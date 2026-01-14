@@ -1,0 +1,12 @@
+{
+  "name": "billing-saas-backend",
+  "version": "1.0.0",
+  "description": "Multi-tenant billing SaaS backend",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2"
+  }
+}
