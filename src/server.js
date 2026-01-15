@@ -12,19 +12,6 @@ app.get("/", (req, res) => {
 });
 
 /**
- * ENV CHECK (TEMPORARY – VERY IMPORTANT)
- * This tells us whether Railway variables are actually reaching Node.js
- */
-app.get("/env-check", (req, res) => {
-  res.json({
-    DB_HOST: process.env.DB_HOST || null,
-    DB_PORT: process.env.DB_PORT || null,
-    DB_USER: process.env.DB_USER || null,
-    DB_NAME: process.env.DB_NAME || null,
-  });
-});
-
-/**
  * DB health check
  */
 app.get("/db-check", async (req, res) => {
