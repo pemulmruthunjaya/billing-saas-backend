@@ -4,12 +4,29 @@ const mysql = require("mysql2/promise");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-// Root check
+/**
+ * Root check
+ */
 app.get("/", (req, res) => {
   res.json({ message: "Billing SaaS Backend is running 🚀" });
 });
 
-// DB health check
+/**
+ * ENV CHECK (TEMPORARY – VERY IMPORTANT)
+ * This tells us whether Railway variables are actually reaching Node.js
+ */
+app.get("/env-check", (req, res) => {
+  res.json({
+    DB_HOST: process.env.DB_HOST || null,
+    DB_PORT: process.env.DB_PORT || null,
+    DB_USER: process.env.DB_USER || null,
+    DB_NAME: process.env.DB_NAME || null,
+  });
+});
+
+/**
+ * DB health check
+ */
 app.get("/db-check", async (req, res) => {
   try {
     const connection = await mysql.createConnection({
@@ -37,6 +54,9 @@ app.get("/db-check", async (req, res) => {
   }
 });
 
+/**
+ * Start server
+ */
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
