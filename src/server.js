@@ -9,7 +9,7 @@ app.get("/", (req, res) => {
   res.json({ message: "Billing SaaS Backend is running 🚀" });
 });
 
-// Health check
+// DB health check
 app.get("/db-check", async (req, res) => {
   try {
     const connection = await mysql.createConnection({
@@ -17,41 +17,26 @@ app.get("/db-check", async (req, res) => {
       port: Number(process.env.DB_PORT),
       user: process.env.DB_USER,
       password: process.env.DB_PASSWORD,
-      database: process.env.DB_NAME
+      database: process.env.DB_NAME,
     });
-
-    await connection.query("SELECT 1");
-    await connection.end();
-
-    res.json({
-      database: "CONNECTED ✅",
-      host: process.env.DB_HOST
-    });
-  } catch (error) {
-    console.error("DB ERROR:", error);
-
-    res.status(500).json({
-      database: "NOT CONNECTED ❌",
-      error: error.message || String(error)
-    });
-  }
-});
-
 
     await connection.execute("SELECT 1");
     await connection.end();
 
     res.json({
       database: "CONNECTED ✅",
-      host: process.env.DB_HOST
+      host: process.env.DB_HOST,
     });
   } catch (error) {
+    console.error("DB ERROR:", error);
+
     res.status(500).json({
       database: "NOT CONNECTED ❌",
-      error: error.message
+      error: error.message || String(error),
     });
   }
 });
+
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
