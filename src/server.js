@@ -12,7 +12,18 @@ app.get("/", (req, res) => {
 });
 
 /**
- * DB health check
+ * Health check (used by Railway / monitoring)
+ */
+app.get("/health", (req, res) => {
+  res.status(200).json({
+    status: "ok",
+    uptime: process.uptime(),
+    timestamp: new Date().toISOString(),
+  });
+});
+
+/**
+ * Database connectivity check (manual use)
  */
 app.get("/db-check", async (req, res) => {
   try {
