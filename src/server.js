@@ -6,9 +6,9 @@ const app = express();
 const PORT = process.env.PORT || 10000;
 
 /* ===============================
-   MIDDLEWARES
+   MIDDLEWARE
 ================================ */
-app.use(express.json()); // REQUIRED for Postman JSON body
+app.use(express.json());
 
 /* ===============================
    ROOT & HEALTH
@@ -26,7 +26,7 @@ app.get("/health", (req, res) => {
 });
 
 /* ===============================
-   DB CONNECTION HELPER
+   DB HELPER
 ================================ */
 async function getDBConnection() {
   return mysql.createConnection({
@@ -39,7 +39,7 @@ async function getDBConnection() {
 }
 
 /* ===============================
-   DB CHECK (MANUAL)
+   DB CHECK
 ================================ */
 app.get("/db-check", async (req, res) => {
   try {
@@ -49,6 +49,7 @@ app.get("/db-check", async (req, res) => {
 
     res.json({ database: "CONNECTED ✅" });
   } catch (error) {
+    console.error("DB CHECK ERROR:", error);
     res.status(500).json({
       database: "NOT CONNECTED ❌",
       error: error.message,
@@ -58,7 +59,6 @@ app.get("/db-check", async (req, res) => {
 
 /* ===============================
    AUTH LOGIN
-   POST /api/auth/login
 ================================ */
 app.post("/api/auth/login", async (req, res) => {
   try {
@@ -73,8 +73,8 @@ app.post("/api/auth/login", async (req, res) => {
     const conn = await getDBConnection();
 
     const [users] = await conn.execute(
-      `SELECT id, email, role, company_id 
-       FROM users 
+      `SELECT id, email, role, company_id
+       FROM users
        WHERE email = ? AND password = ?`,
       [email, password]
     );
@@ -108,4 +108,15 @@ app.post("/api/auth/login", async (req, res) => {
         company_id: user.company_id,
       },
     });
+  } catch (error) {
+    console.error("LOGIN ERROR:", error);
+    res.status(500).json({ message: "Server error" });
   }
+});
+
+/* ===============================
+   START SERVER
+================================ */
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
