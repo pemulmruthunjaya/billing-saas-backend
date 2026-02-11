@@ -58,7 +58,7 @@ app.get("/db-check", async (req, res) => {
 });
 
 /* ===============================
-   AUTH LOGIN
+   AUTH LOGIN (CORRECTED FOR YOUR DB)
 ================================ */
 app.post("/api/auth/login", async (req, res) => {
   try {
@@ -72,23 +72,36 @@ app.post("/api/auth/login", async (req, res) => {
 
     const conn = await getDBConnection();
 
-    const [users] = await conn.execute(
-      `SELECT id, email, role, company_id
-       FROM users
-       WHERE email = ? AND password = ?`,
+    // 1️⃣ Validate credentials from auth_users
+    const [authRows] = await conn.execute(
+      "SELECT id, email FROM auth_users WHERE email = ? AND password = ?",
       [email, password]
     );
 
-    await conn.end();
-
-    if (users.length === 0) {
+    if (authRows.length === 0) {
+      await conn.end();
       return res.status(401).json({
         message: "Invalid email or password",
       });
     }
 
-    const user = users[0];
+    // 2️⃣ Fetch user profile from users table
+    const [userRows] = await conn.execute(
+      "SELECT id, role, company_id FROM users WHERE email = ?",
+      [email]
+    );
 
+    await conn.end();
+
+    if (userRows.length === 0) {
+      return res.status(404).json({
+        message: "User profile not found",
+      });
+    }
+
+    const user = userRows[0];
+
+    // 3️⃣ Generate JWT
     const token = jwt.sign(
       {
         user_id: user.id,
@@ -103,11 +116,12 @@ app.post("/api/auth/login", async (req, res) => {
       token,
       user: {
         id: user.id,
-        email: user.email,
+        email,
         role: user.role,
         company_id: user.company_id,
       },
     });
+
   } catch (error) {
     console.error("LOGIN ERROR:", error);
     res.status(500).json({ message: "Server error" });
