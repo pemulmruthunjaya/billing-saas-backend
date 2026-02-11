@@ -39,6 +39,38 @@ async function getDBConnection() {
 }
 
 /* ===============================
+   AUTH MIDDLEWARE (NEW)
+================================ */
+function authenticateToken(req, res, next) {
+  const authHeader = req.headers["authorization"];
+
+  if (!authHeader) {
+    return res.status(401).json({
+      message: "Access token required",
+    });
+  }
+
+  const token = authHeader.split(" ")[1];
+
+  if (!token) {
+    return res.status(401).json({
+      message: "Invalid token format",
+    });
+  }
+
+  jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
+    if (err) {
+      return res.status(403).json({
+        message: "Invalid or expired token",
+      });
+    }
+
+    req.user = user;
+    next();
+  });
+}
+
+/* ===============================
    DB CHECK
 ================================ */
 app.get("/db-check", async (req, res) => {
@@ -58,7 +90,7 @@ app.get("/db-check", async (req, res) => {
 });
 
 /* ===============================
-   AUTH LOGIN (CORRECTED FOR YOUR DB)
+   AUTH LOGIN
 ================================ */
 app.post("/api/auth/login", async (req, res) => {
   try {
@@ -72,7 +104,7 @@ app.post("/api/auth/login", async (req, res) => {
 
     const conn = await getDBConnection();
 
-    // 1️⃣ Validate credentials from auth_users
+    // Validate credentials
     const [authRows] = await conn.execute(
       "SELECT id, email FROM auth_users WHERE email = ? AND password = ?",
       [email, password]
@@ -85,7 +117,7 @@ app.post("/api/auth/login", async (req, res) => {
       });
     }
 
-    // 2️⃣ Fetch user profile from users table
+    // Fetch user profile
     const [userRows] = await conn.execute(
       "SELECT id, role, company_id FROM users WHERE email = ?",
       [email]
@@ -101,7 +133,6 @@ app.post("/api/auth/login", async (req, res) => {
 
     const user = userRows[0];
 
-    // 3️⃣ Generate JWT
     const token = jwt.sign(
       {
         user_id: user.id,
@@ -124,6 +155,38 @@ app.post("/api/auth/login", async (req, res) => {
 
   } catch (error) {
     console.error("LOGIN ERROR:", error);
+    res.status(500).json({ message: "Server error" });
+  }
+});
+
+/* ===============================
+   PROTECTED TEST ROUTE
+================================ */
+app.get("/api/protected", authenticateToken, (req, res) => {
+  res.json({
+    message: "Protected route accessed successfully 🎉",
+    user: req.user,
+  });
+});
+
+/* ===============================
+   SECURE INVOICE LIST (NEW)
+   Multi-tenant company isolation
+================================ */
+app.get("/api/invoices", authenticateToken, async (req, res) => {
+  try {
+    const conn = await getDBConnection();
+
+    const [rows] = await conn.execute(
+      "SELECT * FROM invoices WHERE company_id = ?",
+      [req.user.company_id]
+    );
+
+    await conn.end();
+
+    res.json(rows);
+  } catch (error) {
+    console.error("INVOICE FETCH ERROR:", error);
     res.status(500).json({ message: "Server error" });
   }
 });
