@@ -5,28 +5,10 @@ const jwt = require("jsonwebtoken");
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-/* ===============================
-   MIDDLEWARE
-================================ */
 app.use(express.json());
 
 /* ===============================
-   ROOT & HEALTH
-================================ */
-app.get("/", (req, res) => {
-  res.json({ message: "Billing SaaS Backend is running 🚀" });
-});
-
-app.get("/health", (req, res) => {
-  res.status(200).json({
-    status: "ok",
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString(),
-  });
-});
-
-/* ===============================
-   DB HELPER
+   DB CONNECTION
 ================================ */
 async function getDBConnection() {
   return mysql.createConnection({
@@ -39,36 +21,32 @@ async function getDBConnection() {
 }
 
 /* ===============================
-   AUTH MIDDLEWARE (NEW)
+   AUTH MIDDLEWARE
 ================================ */
 function authenticateToken(req, res, next) {
   const authHeader = req.headers["authorization"];
-
-  if (!authHeader) {
-    return res.status(401).json({
-      message: "Access token required",
-    });
-  }
-
-  const token = authHeader.split(" ")[1];
+  const token = authHeader && authHeader.split(" ")[1];
 
   if (!token) {
-    return res.status(401).json({
-      message: "Invalid token format",
-    });
+    return res.status(401).json({ message: "Access token required" });
   }
 
   jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
     if (err) {
-      return res.status(403).json({
-        message: "Invalid or expired token",
-      });
+      return res.status(403).json({ message: "Invalid or expired token" });
     }
 
     req.user = user;
     next();
   });
 }
+
+/* ===============================
+   ROOT
+================================ */
+app.get("/", (req, res) => {
+  res.json({ message: "Billing SaaS Backend is running 🚀" });
+});
 
 /* ===============================
    DB CHECK
@@ -81,7 +59,6 @@ app.get("/db-check", async (req, res) => {
 
     res.json({ database: "CONNECTED ✅" });
   } catch (error) {
-    console.error("DB CHECK ERROR:", error);
     res.status(500).json({
       database: "NOT CONNECTED ❌",
       error: error.message,
@@ -90,21 +67,14 @@ app.get("/db-check", async (req, res) => {
 });
 
 /* ===============================
-   AUTH LOGIN
+   LOGIN
 ================================ */
 app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
-    if (!email || !password) {
-      return res.status(400).json({
-        message: "Email and password are required",
-      });
-    }
-
     const conn = await getDBConnection();
 
-    // Validate credentials
     const [authRows] = await conn.execute(
       "SELECT id, email FROM auth_users WHERE email = ? AND password = ?",
       [email, password]
@@ -112,12 +82,9 @@ app.post("/api/auth/login", async (req, res) => {
 
     if (authRows.length === 0) {
       await conn.end();
-      return res.status(401).json({
-        message: "Invalid email or password",
-      });
+      return res.status(401).json({ message: "Invalid email or password" });
     }
 
-    // Fetch user profile
     const [userRows] = await conn.execute(
       "SELECT id, role, company_id FROM users WHERE email = ?",
       [email]
@@ -126,9 +93,7 @@ app.post("/api/auth/login", async (req, res) => {
     await conn.end();
 
     if (userRows.length === 0) {
-      return res.status(404).json({
-        message: "User profile not found",
-      });
+      return res.status(404).json({ message: "User profile not found" });
     }
 
     const user = userRows[0];
@@ -143,51 +108,131 @@ app.post("/api/auth/login", async (req, res) => {
       { expiresIn: "1d" }
     );
 
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email,
-        role: user.role,
-        company_id: user.company_id,
-      },
-    });
+    res.json({ token, user });
 
   } catch (error) {
-    console.error("LOGIN ERROR:", error);
     res.status(500).json({ message: "Server error" });
   }
 });
 
 /* ===============================
-   PROTECTED TEST ROUTE
+   CREATE INVOICE (PRODUCTION)
 ================================ */
-app.get("/api/protected", authenticateToken, (req, res) => {
-  res.json({
-    message: "Protected route accessed successfully 🎉",
-    user: req.user,
-  });
+app.post("/api/invoices", authenticateToken, async (req, res) => {
+  const conn = await getDBConnection();
+
+  try {
+    const {
+      invoice_number,
+      invoice_date,
+      due_date,
+      customer_name,
+      customer_email,
+      customer_phone,
+      notes,
+      tax_rate,
+      items
+    } = req.body;
+
+    if (!items || items.length === 0) {
+      return res.status(400).json({ message: "Invoice must contain items" });
+    }
+
+    await conn.beginTransaction();
+
+    let subtotal = 0;
+
+    // Calculate totals
+    items.forEach(item => {
+      const itemTotal = Number(item.quantity) * Number(item.unit_price);
+      subtotal += itemTotal;
+    });
+
+    const taxAmount = (subtotal * Number(tax_rate || 0)) / 100;
+    const totalAmount = subtotal + taxAmount;
+
+    // Insert invoice
+    const [invoiceResult] = await conn.execute(
+      `INSERT INTO invoices 
+      (company_id, created_by, invoice_number, invoice_date, due_date,
+       customer_name, customer_email, customer_phone,
+       subtotal, tax_amount, total_amount, tax_rate, notes)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        req.user.company_id,
+        req.user.user_id,
+        invoice_number,
+        invoice_date,
+        due_date,
+        customer_name,
+        customer_email,
+        customer_phone,
+        subtotal,
+        taxAmount,
+        totalAmount,
+        tax_rate,
+        notes
+      ]
+    );
+
+    const invoiceId = invoiceResult.insertId;
+
+    // Insert items
+    for (const item of items) {
+      const total_price = Number(item.quantity) * Number(item.unit_price);
+
+      await conn.execute(
+        `INSERT INTO invoice_items
+        (invoice_id, company_id, item_name, description, quantity, unit_price, total_price)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [
+          invoiceId,
+          req.user.company_id,
+          item.item_name,
+          item.description,
+          item.quantity,
+          item.unit_price,
+          total_price
+        ]
+      );
+    }
+
+    await conn.commit();
+    await conn.end();
+
+    res.status(201).json({
+      message: "Invoice created successfully 🎉",
+      invoice_id: invoiceId,
+      subtotal,
+      taxAmount,
+      totalAmount
+    });
+
+  } catch (error) {
+    await conn.rollback();
+    await conn.end();
+    res.status(500).json({ message: "Invoice creation failed", error: error.message });
+  }
 });
 
 /* ===============================
-   SECURE INVOICE LIST (NEW)
-   Multi-tenant company isolation
+   GET COMPANY INVOICES
 ================================ */
 app.get("/api/invoices", authenticateToken, async (req, res) => {
   try {
     const conn = await getDBConnection();
 
     const [rows] = await conn.execute(
-      "SELECT * FROM invoices WHERE company_id = ?",
+      "SELECT * FROM invoices WHERE company_id = ? ORDER BY id DESC",
       [req.user.company_id]
     );
 
     await conn.end();
 
     res.json(rows);
+
   } catch (error) {
-    console.error("INVOICE FETCH ERROR:", error);
-    res.status(500).json({ message: "Server error" });
+    res.status(500).json({ message: "Failed to fetch invoices" });
   }
 });
 
