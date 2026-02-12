@@ -56,7 +56,6 @@ app.get("/db-check", async (req, res) => {
     const conn = await getDBConnection();
     await conn.execute("SELECT 1");
     await conn.end();
-
     res.json({ database: "CONNECTED ✅" });
   } catch (error) {
     res.status(500).json({
@@ -75,8 +74,9 @@ app.post("/api/auth/login", async (req, res) => {
 
     const conn = await getDBConnection();
 
+    // Validate credentials
     const [authRows] = await conn.execute(
-      "SELECT id, email FROM auth_users WHERE email = ? AND password = ?",
+      "SELECT id FROM auth_users WHERE email = ? AND password = ?",
       [email, password]
     );
 
@@ -85,6 +85,7 @@ app.post("/api/auth/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
+    // Fetch user profile
     const [userRows] = await conn.execute(
       "SELECT id, role, company_id FROM users WHERE email = ?",
       [email]
@@ -108,7 +109,15 @@ app.post("/api/auth/login", async (req, res) => {
       { expiresIn: "1d" }
     );
 
-    res.json({ token, user });
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email,
+        role: user.role,
+        company_id: user.company_id,
+      },
+    });
 
   } catch (error) {
     res.status(500).json({ message: "Server error" });
@@ -116,7 +125,7 @@ app.post("/api/auth/login", async (req, res) => {
 });
 
 /* ===============================
-   CREATE INVOICE (PRODUCTION)
+   CREATE INVOICE
 ================================ */
 app.post("/api/invoices", authenticateToken, async (req, res) => {
   const conn = await getDBConnection();
@@ -142,16 +151,13 @@ app.post("/api/invoices", authenticateToken, async (req, res) => {
 
     let subtotal = 0;
 
-    // Calculate totals
     items.forEach(item => {
-      const itemTotal = Number(item.quantity) * Number(item.unit_price);
-      subtotal += itemTotal;
+      subtotal += Number(item.quantity) * Number(item.unit_price);
     });
 
     const taxAmount = (subtotal * Number(tax_rate || 0)) / 100;
     const totalAmount = subtotal + taxAmount;
 
-    // Insert invoice
     const [invoiceResult] = await conn.execute(
       `INSERT INTO invoices 
       (company_id, created_by, invoice_number, invoice_date, due_date,
@@ -177,7 +183,6 @@ app.post("/api/invoices", authenticateToken, async (req, res) => {
 
     const invoiceId = invoiceResult.insertId;
 
-    // Insert items
     for (const item of items) {
       const total_price = Number(item.quantity) * Number(item.unit_price);
 
@@ -211,28 +216,103 @@ app.post("/api/invoices", authenticateToken, async (req, res) => {
   } catch (error) {
     await conn.rollback();
     await conn.end();
-    res.status(500).json({ message: "Invoice creation failed", error: error.message });
+    res.status(500).json({
+      message: "Invoice creation failed",
+      error: error.message
+    });
   }
 });
 
 /* ===============================
-   GET COMPANY INVOICES
+   GET INVOICES (PAGINATED)
 ================================ */
 app.get("/api/invoices", authenticateToken, async (req, res) => {
   try {
+    const companyId = req.user.company_id;
+
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 10;
+    const search = req.query.search || "";
+    const offset = (page - 1) * limit;
+
     const conn = await getDBConnection();
 
+    let baseQuery = `FROM invoices WHERE company_id = ?`;
+    let params = [companyId];
+
+    if (search) {
+      baseQuery += ` AND (invoice_number LIKE ? OR customer_name LIKE ?)`;
+      params.push(`%${search}%`, `%${search}%`);
+    }
+
+    const [countRows] = await conn.execute(
+      `SELECT COUNT(*) as total ${baseQuery}`,
+      params
+    );
+
+    const total = countRows[0].total;
+
     const [rows] = await conn.execute(
-      "SELECT * FROM invoices WHERE company_id = ? ORDER BY id DESC",
-      [req.user.company_id]
+      `SELECT id, invoice_number, invoice_date,
+              customer_name, subtotal, tax_amount,
+              total_amount, status
+       ${baseQuery}
+       ORDER BY id DESC
+       LIMIT ? OFFSET ?`,
+      [...params, limit, offset]
     );
 
     await conn.end();
 
-    res.json(rows);
+    res.json({
+      page,
+      limit,
+      total,
+      totalPages: Math.ceil(total / limit),
+      data: rows,
+    });
 
   } catch (error) {
     res.status(500).json({ message: "Failed to fetch invoices" });
+  }
+});
+
+/* ===============================
+   GET SINGLE INVOICE
+================================ */
+app.get("/api/invoices/:id", authenticateToken, async (req, res) => {
+  try {
+    const companyId = req.user.company_id;
+    const invoiceId = req.params.id;
+
+    const conn = await getDBConnection();
+
+    const [invoiceRows] = await conn.execute(
+      `SELECT * FROM invoices
+       WHERE id = ? AND company_id = ?`,
+      [invoiceId, companyId]
+    );
+
+    if (invoiceRows.length === 0) {
+      await conn.end();
+      return res.status(404).json({ message: "Invoice not found" });
+    }
+
+    const [items] = await conn.execute(
+      `SELECT * FROM invoice_items
+       WHERE invoice_id = ? AND company_id = ?`,
+      [invoiceId, companyId]
+    );
+
+    await conn.end();
+
+    res.json({
+      invoice: invoiceRows[0],
+      items,
+    });
+
+  } catch (error) {
+    res.status(500).json({ message: "Failed to fetch invoice" });
   }
 });
 
