@@ -52,16 +52,19 @@ app.get("/", (req, res) => {
    DB CHECK
 ================================ */
 app.get("/db-check", async (req, res) => {
+  let conn;
   try {
-    const conn = await getDBConnection();
+    conn = await getDBConnection();
     await conn.execute("SELECT 1");
-    await conn.end();
     res.json({ database: "CONNECTED ✅" });
   } catch (error) {
+    console.error("DB CHECK ERROR:", error);
     res.status(500).json({
       database: "NOT CONNECTED ❌",
       error: error.message,
     });
+  } finally {
+    if (conn) await conn.end();
   }
 });
 
@@ -69,29 +72,25 @@ app.get("/db-check", async (req, res) => {
    LOGIN
 ================================ */
 app.post("/api/auth/login", async (req, res) => {
+  let conn;
   try {
     const { email, password } = req.body;
 
-    const conn = await getDBConnection();
+    conn = await getDBConnection();
 
-    // Validate credentials
     const [authRows] = await conn.execute(
       "SELECT id FROM auth_users WHERE email = ? AND password = ?",
       [email, password]
     );
 
     if (authRows.length === 0) {
-      await conn.end();
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
-    // Fetch user profile
     const [userRows] = await conn.execute(
       "SELECT id, role, company_id FROM users WHERE email = ?",
       [email]
     );
-
-    await conn.end();
 
     if (userRows.length === 0) {
       return res.status(404).json({ message: "User profile not found" });
@@ -120,7 +119,10 @@ app.post("/api/auth/login", async (req, res) => {
     });
 
   } catch (error) {
+    console.error("LOGIN ERROR:", error);
     res.status(500).json({ message: "Server error" });
+  } finally {
+    if (conn) await conn.end();
   }
 });
 
@@ -128,7 +130,7 @@ app.post("/api/auth/login", async (req, res) => {
    CREATE INVOICE
 ================================ */
 app.post("/api/invoices", authenticateToken, async (req, res) => {
-  const conn = await getDBConnection();
+  let conn;
 
   try {
     const {
@@ -147,13 +149,14 @@ app.post("/api/invoices", authenticateToken, async (req, res) => {
       return res.status(400).json({ message: "Invoice must contain items" });
     }
 
+    conn = await getDBConnection();
     await conn.beginTransaction();
 
     let subtotal = 0;
 
-    items.forEach(item => {
+    for (const item of items) {
       subtotal += Number(item.quantity) * Number(item.unit_price);
-    });
+    }
 
     const taxAmount = (subtotal * Number(tax_rate || 0)) / 100;
     const totalAmount = subtotal + taxAmount;
@@ -184,12 +187,14 @@ app.post("/api/invoices", authenticateToken, async (req, res) => {
     const invoiceId = invoiceResult.insertId;
 
     for (const item of items) {
-      const total_price = Number(item.quantity) * Number(item.unit_price);
+      const total_price =
+        Number(item.quantity) * Number(item.unit_price);
 
       await conn.execute(
         `INSERT INTO invoice_items
-        (invoice_id, company_id, item_name, description, quantity, unit_price, total_price)
-        VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        (invoice_id, company_id, item_name, description,
+         quantity, unit_price, total_price)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           invoiceId,
           req.user.company_id,
@@ -203,7 +208,6 @@ app.post("/api/invoices", authenticateToken, async (req, res) => {
     }
 
     await conn.commit();
-    await conn.end();
 
     res.status(201).json({
       message: "Invoice created successfully 🎉",
@@ -214,12 +218,14 @@ app.post("/api/invoices", authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    await conn.rollback();
-    await conn.end();
+    if (conn) await conn.rollback();
+    console.error("CREATE INVOICE ERROR:", error);
     res.status(500).json({
       message: "Invoice creation failed",
       error: error.message
     });
+  } finally {
+    if (conn) await conn.end();
   }
 });
 
@@ -227,6 +233,8 @@ app.post("/api/invoices", authenticateToken, async (req, res) => {
    GET INVOICES (PAGINATED)
 ================================ */
 app.get("/api/invoices", authenticateToken, async (req, res) => {
+  let conn;
+
   try {
     const companyId = req.user.company_id;
 
@@ -235,7 +243,7 @@ app.get("/api/invoices", authenticateToken, async (req, res) => {
     const search = req.query.search || "";
     const offset = (page - 1) * limit;
 
-    const conn = await getDBConnection();
+    conn = await getDBConnection();
 
     let baseQuery = `FROM invoices WHERE company_id = ?`;
     let params = [companyId];
@@ -254,15 +262,13 @@ app.get("/api/invoices", authenticateToken, async (req, res) => {
 
     const [rows] = await conn.execute(
       `SELECT id, invoice_number, invoice_date,
-              customer_name, subtotal, tax_amount,
-              total_amount, status
+              customer_name, subtotal,
+              tax_amount, total_amount, status
        ${baseQuery}
        ORDER BY id DESC
        LIMIT ? OFFSET ?`,
       [...params, limit, offset]
     );
-
-    await conn.end();
 
     res.json({
       page,
@@ -273,7 +279,13 @@ app.get("/api/invoices", authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch invoices" });
+    console.error("FETCH INVOICES ERROR:", error);
+    res.status(500).json({
+      message: "Failed to fetch invoices",
+      error: error.message
+    });
+  } finally {
+    if (conn) await conn.end();
   }
 });
 
@@ -281,11 +293,13 @@ app.get("/api/invoices", authenticateToken, async (req, res) => {
    GET SINGLE INVOICE
 ================================ */
 app.get("/api/invoices/:id", authenticateToken, async (req, res) => {
+  let conn;
+
   try {
     const companyId = req.user.company_id;
     const invoiceId = req.params.id;
 
-    const conn = await getDBConnection();
+    conn = await getDBConnection();
 
     const [invoiceRows] = await conn.execute(
       `SELECT * FROM invoices
@@ -294,7 +308,6 @@ app.get("/api/invoices/:id", authenticateToken, async (req, res) => {
     );
 
     if (invoiceRows.length === 0) {
-      await conn.end();
       return res.status(404).json({ message: "Invoice not found" });
     }
 
@@ -304,15 +317,19 @@ app.get("/api/invoices/:id", authenticateToken, async (req, res) => {
       [invoiceId, companyId]
     );
 
-    await conn.end();
-
     res.json({
       invoice: invoiceRows[0],
       items,
     });
 
   } catch (error) {
-    res.status(500).json({ message: "Failed to fetch invoice" });
+    console.error("FETCH SINGLE INVOICE ERROR:", error);
+    res.status(500).json({
+      message: "Failed to fetch invoice",
+      error: error.message
+    });
+  } finally {
+    if (conn) await conn.end();
   }
 });
 
