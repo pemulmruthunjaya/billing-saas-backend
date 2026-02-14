@@ -1,5 +1,8 @@
 require("dotenv").config();
 
+const PDFDocument = require("pdfkit");
+const path = require("path");
+const fs = require("fs");
 const express = require("express");
 const mysql = require("mysql2/promise");
 const jwt = require("jsonwebtoken");
@@ -569,6 +572,124 @@ app.get("/api/dashboard", authenticateToken, async (req, res) => {
     });
   }
 });
+
+/* =========================================
+   GENERATE INVOICE PDF
+========================================= */
+
+app.get("/api/invoices/:id/pdf", async (req, res) => {
+  try {
+    const invoiceId = req.params.id;
+
+    const connection = await getDBConnection();
+
+    // Get invoice
+    const [invoiceRows] = await connection.execute(
+      "SELECT * FROM invoices WHERE id = ?",
+      [invoiceId]
+    );
+
+    if (invoiceRows.length === 0) {
+      return res.status(404).json({ message: "Invoice not found" });
+    }
+
+    const invoice = invoiceRows[0];
+
+    // Get items
+    const [items] = await connection.execute(
+      "SELECT * FROM invoice_items WHERE invoice_id = ?",
+      [invoiceId]
+    );
+
+    await connection.end();
+
+    // Create PDF
+    const doc = new PDFDocument({ margin: 50 });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `inline; filename=invoice-${invoice.invoice_number}.pdf`
+    );
+
+    doc.pipe(res);
+
+    // Logo
+    const logoPath = path.join(__dirname, "../assets/logo.png");
+    if (fs.existsSync(logoPath)) {
+      doc.image(logoPath, 50, 45, { width: 120 });
+    }
+
+    // Company Name
+    doc
+      .fontSize(20)
+      .text("Your Company Name", 50, 120);
+
+    doc
+      .fontSize(10)
+      .text("Email: info@yourcompany.com")
+      .text("Phone: +91 9999999999")
+      .moveDown();
+
+    // Invoice Title
+    doc
+      .fontSize(18)
+      .text("INVOICE", 400, 50);
+
+    doc
+      .fontSize(12)
+      .text(`Invoice #: ${invoice.invoice_number}`, 400, 80)
+      .text(`Date: ${invoice.invoice_date.toISOString().split("T")[0]}`)
+      .text(`Due Date: ${invoice.due_date.toISOString().split("T")[0]}`);
+
+    doc.moveDown().moveDown();
+
+    // Customer
+    doc
+      .fontSize(14)
+      .text("Bill To:", 50, 200)
+      .fontSize(12)
+      .text(invoice.customer_name)
+      .text(invoice.customer_email)
+      .text(invoice.customer_phone);
+
+    doc.moveDown().moveDown();
+
+    // Table Header
+    doc
+      .fontSize(12)
+      .text("Item", 50, 300)
+      .text("Qty", 250, 300)
+      .text("Price", 300, 300)
+      .text("Total", 400, 300);
+
+    let y = 320;
+
+    items.forEach((item) => {
+      doc
+        .fontSize(10)
+        .text(item.item_name, 50, y)
+        .text(item.quantity, 250, y)
+        .text(item.unit_price, 300, y)
+        .text(item.total_price, 400, y);
+
+      y += 20;
+    });
+
+    // Totals
+    doc
+      .fontSize(12)
+      .text(`Subtotal: ₹${invoice.subtotal}`, 400, y + 20)
+      .text(`Tax (${invoice.tax_rate}%): ₹${invoice.tax_amount}`)
+      .text(`Total: ₹${invoice.total_amount}`);
+
+    doc.end();
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ message: "Error generating PDF" });
+  }
+});
+
 
 /* ===============================
    START SERVER
