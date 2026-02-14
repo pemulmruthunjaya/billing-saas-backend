@@ -491,6 +491,84 @@ app.post("/api/invoices/:id/pay", authenticateToken, async (req, res) => {
 });
 
 /* ===============================
+   DASHBOARD SUMMARY
+================================ */
+app.get("/api/dashboard", authenticateToken, async (req, res) => {
+  try {
+    const companyId = req.user.company_id;
+    const conn = await getDBConnection();
+
+    // 1️⃣ Total Revenue (Paid invoices)
+    const [totalRevenueRows] = await conn.execute(
+      `SELECT IFNULL(SUM(total_amount), 0) as totalRevenue
+       FROM invoices
+       WHERE company_id = ? AND status = 'paid'`,
+      [companyId]
+    );
+
+    // 2️⃣ Total Invoices
+    const [totalInvoicesRows] = await conn.execute(
+      `SELECT COUNT(*) as totalInvoices
+       FROM invoices
+       WHERE company_id = ?`,
+      [companyId]
+    );
+
+    // 3️⃣ Paid Invoices Count
+    const [paidInvoicesRows] = await conn.execute(
+      `SELECT COUNT(*) as paidInvoices
+       FROM invoices
+       WHERE company_id = ? AND status = 'paid'`,
+      [companyId]
+    );
+
+    // 4️⃣ Pending Invoices Count
+    const [pendingInvoicesRows] = await conn.execute(
+      `SELECT COUNT(*) as pendingInvoices
+       FROM invoices
+       WHERE company_id = ? AND status != 'paid'`,
+      [companyId]
+    );
+
+    // 5️⃣ Total Pending Amount
+    const [pendingAmountRows] = await conn.execute(
+      `SELECT IFNULL(SUM(total_amount), 0) as totalPendingAmount
+       FROM invoices
+       WHERE company_id = ? AND status != 'paid'`,
+      [companyId]
+    );
+
+    // 6️⃣ This Month Revenue
+    const [thisMonthRows] = await conn.execute(
+      `SELECT IFNULL(SUM(total_amount), 0) as thisMonthRevenue
+       FROM invoices
+       WHERE company_id = ?
+       AND status = 'paid'
+       AND MONTH(invoice_date) = MONTH(CURRENT_DATE())
+       AND YEAR(invoice_date) = YEAR(CURRENT_DATE())`,
+      [companyId]
+    );
+
+    await conn.end();
+
+    res.json({
+      totalRevenue: totalRevenueRows[0].totalRevenue,
+      totalInvoices: totalInvoicesRows[0].totalInvoices,
+      paidInvoices: paidInvoicesRows[0].paidInvoices,
+      pendingInvoices: pendingInvoicesRows[0].pendingInvoices,
+      totalPendingAmount: pendingAmountRows[0].totalPendingAmount,
+      thisMonthRevenue: thisMonthRows[0].thisMonthRevenue
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      message: "Failed to load dashboard",
+      error: error.message
+    });
+  }
+});
+
+/* ===============================
    START SERVER
 ================================ */
 app.listen(PORT, () => {
