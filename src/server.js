@@ -400,6 +400,97 @@ app.put("/api/invoices/:id/status", authenticateToken, async (req, res) => {
 });
 
 /* ===============================
+   RECORD PAYMENT (UPDATED)
+================================ */
+app.post("/api/invoices/:id/pay", authenticateToken, async (req, res) => {
+  const conn = await getDBConnection();
+
+  try {
+    const invoiceId = req.params.id;
+    const companyId = req.user.company_id;
+
+    const {
+      amount,
+      payment_date,
+      payment_method,
+      reference_number
+    } = req.body;
+
+    if (!amount || !payment_date || !payment_method) {
+      return res.status(400).json({
+        message: "amount, payment_date and payment_method are required"
+      });
+    }
+
+    await conn.beginTransaction();
+
+    // 1️⃣ Check invoice exists
+    const [invoiceRows] = await conn.execute(
+      `SELECT id, total_amount, status
+       FROM invoices
+       WHERE id = ? AND company_id = ?`,
+      [invoiceId, companyId]
+    );
+
+    if (invoiceRows.length === 0) {
+      await conn.rollback();
+      await conn.end();
+      return res.status(404).json({ message: "Invoice not found" });
+    }
+
+    const invoice = invoiceRows[0];
+
+    if (invoice.status === "paid") {
+      await conn.rollback();
+      await conn.end();
+      return res.status(400).json({ message: "Invoice already paid" });
+    }
+
+    // 2️⃣ Insert payment
+    await conn.execute(
+      `INSERT INTO payments
+       (invoice_id, company_id, amount, payment_date, payment_method, reference_number)
+       VALUES (?, ?, ?, ?, ?, ?)`,
+      [
+        invoiceId,
+        companyId,
+        amount,
+        payment_date,
+        payment_method,
+        reference_number || null
+      ]
+    );
+
+    // 3️⃣ Update invoice status
+    await conn.execute(
+      `UPDATE invoices
+       SET status = 'paid'
+       WHERE id = ? AND company_id = ?`,
+      [invoiceId, companyId]
+    );
+
+    await conn.commit();
+    await conn.end();
+
+    res.json({
+      message: "Payment recorded successfully ✅",
+      invoice_id: invoiceId,
+      paid_amount: amount,
+      status: "paid"
+    });
+
+  } catch (error) {
+    await conn.rollback();
+    await conn.end();
+
+    res.status(500).json({
+      message: "Payment failed",
+      error: error.message
+    });
+  }
+});
+
+/* ===============================
    START SERVER
 ================================ */
 app.listen(PORT, () => {
