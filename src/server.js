@@ -58,7 +58,6 @@ app.get("/db-check", async (req, res) => {
     await conn.execute("SELECT 1");
     res.json({ database: "CONNECTED ✅" });
   } catch (error) {
-    console.error("DB CHECK ERROR:", error);
     res.status(500).json({
       database: "NOT CONNECTED ❌",
       error: error.message,
@@ -78,6 +77,7 @@ app.post("/api/auth/login", async (req, res) => {
 
     conn = await getDBConnection();
 
+    // Validate credentials
     const [authRows] = await conn.execute(
       "SELECT id FROM auth_users WHERE email = ? AND password = ?",
       [email, password]
@@ -87,6 +87,7 @@ app.post("/api/auth/login", async (req, res) => {
       return res.status(401).json({ message: "Invalid email or password" });
     }
 
+    // Fetch user profile
     const [userRows] = await conn.execute(
       "SELECT id, role, company_id FROM users WHERE email = ?",
       [email]
@@ -131,8 +132,9 @@ app.post("/api/auth/login", async (req, res) => {
 ================================ */
 app.post("/api/invoices", authenticateToken, async (req, res) => {
   let conn;
-
   try {
+    conn = await getDBConnection();
+
     const {
       invoice_number,
       invoice_date,
@@ -149,14 +151,13 @@ app.post("/api/invoices", authenticateToken, async (req, res) => {
       return res.status(400).json({ message: "Invoice must contain items" });
     }
 
-    conn = await getDBConnection();
     await conn.beginTransaction();
 
     let subtotal = 0;
 
-    for (const item of items) {
+    items.forEach(item => {
       subtotal += Number(item.quantity) * Number(item.unit_price);
-    }
+    });
 
     const taxAmount = (subtotal * Number(tax_rate || 0)) / 100;
     const totalAmount = subtotal + taxAmount;
@@ -187,14 +188,12 @@ app.post("/api/invoices", authenticateToken, async (req, res) => {
     const invoiceId = invoiceResult.insertId;
 
     for (const item of items) {
-      const total_price =
-        Number(item.quantity) * Number(item.unit_price);
+      const total_price = Number(item.quantity) * Number(item.unit_price);
 
       await conn.execute(
         `INSERT INTO invoice_items
-        (invoice_id, company_id, item_name, description,
-         quantity, unit_price, total_price)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        (invoice_id, company_id, item_name, description, quantity, unit_price, total_price)
+        VALUES (?, ?, ?, ?, ?, ?, ?)`,
         [
           invoiceId,
           req.user.company_id,
@@ -230,11 +229,10 @@ app.post("/api/invoices", authenticateToken, async (req, res) => {
 });
 
 /* ===============================
-   GET INVOICES (PAGINATED)
+   GET INVOICES (PAGINATION FIXED)
 ================================ */
 app.get("/api/invoices", authenticateToken, async (req, res) => {
   let conn;
-
   try {
     const companyId = req.user.company_id;
 
@@ -266,8 +264,8 @@ app.get("/api/invoices", authenticateToken, async (req, res) => {
               tax_amount, total_amount, status
        ${baseQuery}
        ORDER BY id DESC
-       LIMIT ? OFFSET ?`,
-      [...params, limit, offset]
+       LIMIT ${limit} OFFSET ${offset}`,
+      params
     );
 
     res.json({
@@ -294,7 +292,6 @@ app.get("/api/invoices", authenticateToken, async (req, res) => {
 ================================ */
 app.get("/api/invoices/:id", authenticateToken, async (req, res) => {
   let conn;
-
   try {
     const companyId = req.user.company_id;
     const invoiceId = req.params.id;
@@ -323,7 +320,7 @@ app.get("/api/invoices/:id", authenticateToken, async (req, res) => {
     });
 
   } catch (error) {
-    console.error("FETCH SINGLE INVOICE ERROR:", error);
+    console.error("GET SINGLE INVOICE ERROR:", error);
     res.status(500).json({
       message: "Failed to fetch invoice",
       error: error.message
