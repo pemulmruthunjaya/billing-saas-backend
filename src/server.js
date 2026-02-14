@@ -331,6 +331,75 @@ app.get("/api/invoices/:id", authenticateToken, async (req, res) => {
 });
 
 /* ===============================
+   UPDATE INVOICE STATUS
+================================ */
+app.put("/api/invoices/:id/status", authenticateToken, async (req, res) => {
+  const conn = await getDBConnection();
+
+  try {
+    const companyId = req.user.company_id;
+    const invoiceId = req.params.id;
+    const { status } = req.body;
+
+    const allowedStatuses = ["draft", "sent", "paid", "cancelled"];
+
+    if (!allowedStatuses.includes(status)) {
+      await conn.end();
+      return res.status(400).json({
+        message: "Invalid status value",
+      });
+    }
+
+    // Check if invoice exists and belongs to company
+    const [invoiceRows] = await conn.execute(
+      `SELECT id FROM invoices
+       WHERE id = ? AND company_id = ?`,
+      [invoiceId, companyId]
+    );
+
+    if (invoiceRows.length === 0) {
+      await conn.end();
+      return res.status(404).json({
+        message: "Invoice not found",
+      });
+    }
+
+    // Update status
+    await conn.execute(
+      `UPDATE invoices
+       SET status = ?
+       WHERE id = ? AND company_id = ?`,
+      [status, invoiceId, companyId]
+    );
+
+    await conn.commit();
+
+    // Fetch updated invoice
+    const [updatedInvoice] = await conn.execute(
+      `SELECT id, invoice_number, status
+       FROM invoices
+       WHERE id = ?`,
+      [invoiceId]
+    );
+
+    await conn.end();
+
+    res.json({
+      message: "Invoice status updated successfully ✅",
+      invoice: updatedInvoice[0],
+    });
+
+  } catch (error) {
+    await conn.rollback();
+    await conn.end();
+    res.status(500).json({
+      message: "Failed to update invoice status",
+      error: error.message,
+    });
+  }
+});
+
+/* ===============================
    START SERVER
 ================================ */
 app.listen(PORT, () => {
