@@ -1,0 +1,609 @@
+const db = require("../db/connection");
+
+let invoiceStatusColumnReady = false;
+let invoiceMrpColumnsReady = false;
+
+const ensureInvoiceStatusColumn = async () => {
+  if (invoiceStatusColumnReady) {
+    return;
+  }
+
+  await db.query(
+    "ALTER TABLE invoices MODIFY status VARCHAR(30) NOT NULL DEFAULT 'pending'"
+  );
+
+  invoiceStatusColumnReady = true;
+};
+
+const ensureInvoiceMrpColumns = async () => {
+  if (invoiceMrpColumnsReady) {
+    return;
+  }
+
+  const [productColumns] = await db.query("SHOW COLUMNS FROM products LIKE 'mrp'");
+  if (!productColumns.length) {
+    await db.query(
+      "ALTER TABLE products ADD COLUMN mrp DECIMAL(10,2) NOT NULL DEFAULT 0"
+    );
+  }
+
+  const [invoiceItemColumns] = await db.query("SHOW COLUMNS FROM invoice_items LIKE 'mrp'");
+  if (!invoiceItemColumns.length) {
+    await db.query(
+      "ALTER TABLE invoice_items ADD COLUMN mrp DECIMAL(10,2) NOT NULL DEFAULT 0"
+    );
+  }
+
+  invoiceMrpColumnsReady = true;
+};
+
+/**
+ * 🔢 AUTO INVOICE NUMBER GENERATOR
+ */
+const getNextInvoiceNumberFromExisting = async (company_id, prefix) => {
+  const likePattern = `${prefix}-%`;
+  const [rows] = await db.query(
+    `SELECT MAX(CAST(SUBSTRING_INDEX(invoice_number, '-', -1) AS UNSIGNED)) AS max_number
+     FROM invoices
+     WHERE company_id = ? AND invoice_number LIKE ?`,
+    [company_id, likePattern]
+  );
+
+  return Number(rows[0]?.max_number || 0) + 1;
+};
+
+const generateInvoiceNumber = async (company_id) => {
+  const [settings] = await db.query(
+    "SELECT * FROM invoice_settings WHERE company_id=? LIMIT 1",
+    [company_id]
+  );
+
+  if (!settings.length) {
+    const prefix = "INV";
+    const nextNumber = await getNextInvoiceNumberFromExisting(company_id, prefix);
+
+    await db.query(
+      `INSERT INTO invoice_settings (company_id, prefix, current_number)
+       VALUES (?, ?, ?)`,
+      [company_id, prefix, nextNumber]
+    );
+
+    return generateInvoiceNumber(company_id);
+  }
+
+  const { prefix, current_number } = settings[0];
+  const nextNumberFromExisting =
+    await getNextInvoiceNumberFromExisting(company_id, prefix);
+  const invoiceNumberValue = Math.max(
+    Number(current_number || 1),
+    nextNumberFromExisting
+  );
+
+  const invoiceNumber =
+    `${prefix}-${String(invoiceNumberValue).padStart(4, "0")}`;
+
+  await db.query(
+    "UPDATE invoice_settings SET current_number = ? WHERE company_id=?",
+    [invoiceNumberValue + 1, company_id]
+  );
+
+  return invoiceNumber;
+};
+
+/**
+ * ===============================
+ * ✅ CREATE INVOICE + STOCK FIX
+ * ===============================
+ */
+exports.createInvoice = async (req, res) => {
+  try {
+    await ensureInvoiceMrpColumns();
+
+    console.log("📥 Incoming Payload:", req.body);
+
+    const { invoice_date, customer_name, items } = req.body;
+    const company_id = req.user.company_id;
+    const created_by = req.user.user_id;
+
+    if (!invoice_date || !customer_name || !items?.length) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    const invoice_number = await generateInvoiceNumber(company_id);
+
+    let subtotal = 0;
+    let tax_amount = 0;
+
+    const processedItems = [];
+
+    // ✅ VALIDATE STOCK
+    for (let item of items) {
+      console.log("👉 Checking item:", item);
+
+      if (!item.product_id) {
+        return res.status(400).json({
+          message: `product_id missing for ${item.name}`
+        });
+      }
+
+      const [productRows] = await db.query(
+        "SELECT stock FROM products WHERE id=? AND company_id=?",
+        [item.product_id, company_id]
+      );
+
+      if (!productRows.length) {
+        return res.status(400).json({
+          message: `Product not found: ${item.name}`
+        });
+      }
+
+      const availableStock = productRows[0].stock;
+
+      if (availableStock < item.quantity) {
+        return res.status(400).json({
+          message: `Insufficient stock for ${item.name}. Available: ${availableStock}`
+        });
+      }
+
+      const qty = Number(item.quantity || 0);
+      const price = Number(item.unit_price || 0);
+      const mrp = Number(item.mrp || 0);
+      const gst = Number(item.gst_rate || 0);
+
+      const base = qty * price;
+      const gstAmount = (base * gst) / 100;
+      const total = base + gstAmount;
+
+      subtotal += base;
+      tax_amount += gstAmount;
+
+      processedItems.push({
+        product_id: item.product_id,
+        name: item.name,
+        quantity: qty,
+        price,
+        mrp,
+        gst,
+        total
+      });
+    }
+
+    const cgst = tax_amount / 2;
+    const sgst = tax_amount / 2;
+    const igst = 0;
+    const total_amount = subtotal + tax_amount;
+
+    // ✅ INSERT INVOICE
+    const [invoiceResult] = await db.query(
+      `INSERT INTO invoices 
+      (company_id, created_by, invoice_number, invoice_date, customer_name, subtotal, tax_amount, cgst, sgst, igst, total_amount)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [
+        company_id,
+        created_by,
+        invoice_number,
+        invoice_date,
+        customer_name,
+        subtotal,
+        tax_amount,
+        cgst,
+        sgst,
+        igst,
+        total_amount
+      ]
+    );
+
+    const invoice_id = invoiceResult.insertId;
+
+    // ✅ INSERT ITEMS + DEDUCT STOCK
+    for (let item of processedItems) {
+      await db.query(
+        `INSERT INTO invoice_items 
+        (invoice_id, company_id, item_name, quantity, unit_price, mrp, total_price, gst_rate)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          invoice_id,
+          company_id,
+          item.name,
+          item.quantity,
+          item.price,
+          item.mrp,
+          item.total,
+          item.gst
+        ]
+      );
+
+      const [updateResult] = await db.query(
+        `UPDATE products 
+         SET stock = stock - ? 
+         WHERE id = ? AND company_id = ?`,
+        [item.quantity, item.product_id, company_id]
+      );
+
+      console.log("🟢 STOCK UPDATED:", updateResult);
+    }
+
+    res.status(201).json({
+      message: "Invoice created & stock updated ✅",
+      invoice_id,
+      invoice_number
+    });
+
+  } catch (error) {
+    console.error("❌ CREATE ERROR:", error);
+    res.status(500).json({
+      message: "Server error",
+      error: error.message
+    });
+  }
+};
+
+/**
+ * ===============================
+ * 📄 GET ALL INVOICES
+ * ===============================
+ */
+exports.getInvoices = async (req, res) => {
+  try {
+    const [rows] = await db.query(
+      `SELECT
+        i.*,
+        LOWER(COALESCE(i.status, 'pending')) AS status,
+        CASE
+          WHEN LOWER(COALESCE(i.status, '')) = 'paid' THEN i.total_amount
+          ELSE COALESCE(payment_totals.paid_amount, 0)
+        END AS paid_amount,
+        GREATEST(
+          i.total_amount -
+          CASE
+            WHEN LOWER(COALESCE(i.status, '')) = 'paid' THEN i.total_amount
+            ELSE COALESCE(payment_totals.paid_amount, 0)
+          END,
+          0
+        ) AS due_amount
+       FROM invoices i
+       LEFT JOIN (
+         SELECT invoice_id, company_id, SUM(amount) AS paid_amount
+         FROM payments
+         GROUP BY invoice_id, company_id
+       ) payment_totals
+         ON payment_totals.invoice_id = i.id
+        AND payment_totals.company_id = i.company_id
+       WHERE i.company_id=?
+       ORDER BY i.id DESC`,
+      [req.user.company_id]
+    );
+    res.json(rows);
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * ===============================
+ * 🔍 GET INVOICE BY ID
+ * ===============================
+ */
+exports.getInvoiceById = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const company_id = req.user.company_id;
+
+    const [invoice] = await db.query(
+      `SELECT
+        i.*,
+        c.phone AS customer_phone,
+        c.email AS customer_email,
+        c.address AS customer_address,
+        LOWER(COALESCE(i.status, 'pending')) AS status,
+        CASE
+          WHEN LOWER(COALESCE(i.status, '')) = 'paid' THEN i.total_amount
+          ELSE COALESCE(payment_totals.paid_amount, 0)
+        END AS paid_amount,
+        GREATEST(
+          i.total_amount -
+          CASE
+            WHEN LOWER(COALESCE(i.status, '')) = 'paid' THEN i.total_amount
+            ELSE COALESCE(payment_totals.paid_amount, 0)
+          END,
+          0
+        ) AS due_amount
+       FROM invoices i
+       LEFT JOIN customers c
+         ON c.name = i.customer_name
+        AND c.company_id = i.company_id
+       LEFT JOIN (
+         SELECT invoice_id, company_id, SUM(amount) AS paid_amount
+         FROM payments
+         GROUP BY invoice_id, company_id
+       ) payment_totals
+         ON payment_totals.invoice_id = i.id
+        AND payment_totals.company_id = i.company_id
+       WHERE i.id=? AND i.company_id=?`,
+      [id, company_id]
+    );
+
+    if (!invoice.length) {
+      return res.status(404).json({ message: "Invoice not found" });
+    }
+
+    const [items] = await db.query(
+      `SELECT
+        ii.*,
+        p.hsn AS hsn,
+        p.sku AS sku
+       FROM invoice_items ii
+       LEFT JOIN products p
+         ON p.name = ii.item_name
+        AND p.company_id = ii.company_id
+       WHERE ii.invoice_id=? AND ii.company_id=?
+       ORDER BY ii.id ASC`,
+      [id, company_id]
+    );
+
+    res.json({
+      ...invoice[0],
+      items
+    });
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * ===============================
+ * 🗑 DELETE INVOICE (RESTORE STOCK)
+ * ===============================
+ */
+exports.deleteInvoice = async (req, res) => {
+  try {
+    const { id } = req.params;
+    const company_id = req.user.company_id;
+
+    const [invoice] = await db.query(
+      "SELECT id FROM invoices WHERE id=? AND company_id=?",
+      [id, company_id]
+    );
+
+    if (!invoice.length) {
+      return res.status(404).json({ message: "Invoice not found" });
+    }
+
+    const [items] = await db.query(
+      "SELECT * FROM invoice_items WHERE invoice_id=? AND company_id=?",
+      [id, company_id]
+    );
+
+    // 🔁 RESTORE STOCK
+    for (let item of items) {
+      await db.query(
+        "UPDATE products SET stock = stock + ? WHERE name=? AND company_id=?",
+        [item.quantity, item.item_name, company_id]
+      );
+    }
+
+    await db.query(
+      "DELETE FROM invoices WHERE id=? AND company_id=?",
+      [id, company_id]
+    );
+
+    res.json({ message: "Invoice deleted & stock restored ✅" });
+
+  } catch (error) {
+    res.status(500).json({ message: error.message });
+  }
+};
+
+/**
+ * ===============================
+ * ✏️ UPDATE INVOICE (BASIC)
+ * ===============================
+ */
+exports.updateInvoice = async (req, res) => {
+  const connection = await db.getConnection();
+
+  try {
+    await ensureInvoiceMrpColumns();
+
+    const { id } = req.params;
+    const company_id = req.user.company_id;
+    const { invoice_date, customer_name, items } = req.body;
+
+    if (!invoice_date || !customer_name || !items?.length) {
+      return res.status(400).json({ message: "Missing required fields" });
+    }
+
+    await ensureInvoiceStatusColumn();
+    await connection.beginTransaction();
+
+    const [invoiceRows] = await connection.query(
+      "SELECT id, status FROM invoices WHERE id=? AND company_id=?",
+      [id, company_id]
+    );
+
+    if (!invoiceRows.length) {
+      await connection.rollback();
+      return res.status(404).json({ message: "Invoice not found" });
+    }
+
+    const [oldItems] = await connection.query(
+      "SELECT * FROM invoice_items WHERE invoice_id=? AND company_id=?",
+      [id, company_id]
+    );
+
+    for (const item of oldItems) {
+      await connection.query(
+        "UPDATE products SET stock = stock + ? WHERE name=? AND company_id=?",
+        [Number(item.quantity || 0), item.item_name, company_id]
+      );
+    }
+
+    let subtotal = 0;
+    let tax_amount = 0;
+    const processedItems = [];
+
+    for (const item of items) {
+      const name = String(item.name || item.item_name || "").trim();
+      const qty = Number(item.quantity || 0);
+      const price = Number(item.unit_price || item.price || 0);
+      const mrp = Number(item.mrp || 0);
+      const gst = Number(item.gst_rate || item.gst || 0);
+
+      if (!name || qty <= 0) {
+        await connection.rollback();
+        return res.status(400).json({ message: "Please enter valid invoice items" });
+      }
+
+      const [productRows] = await connection.query(
+        "SELECT id, stock FROM products WHERE name=? AND company_id=? LIMIT 1",
+        [name, company_id]
+      );
+
+      if (!productRows.length) {
+        await connection.rollback();
+        return res.status(400).json({ message: `Product not found: ${name}` });
+      }
+
+      if (Number(productRows[0].stock || 0) < qty) {
+        await connection.rollback();
+        return res.status(400).json({
+          message: `Insufficient stock for ${name}. Available: ${productRows[0].stock}`
+        });
+      }
+
+      const base = qty * price;
+      const gstAmount = (base * gst) / 100;
+      const total = base + gstAmount;
+
+      subtotal += base;
+      tax_amount += gstAmount;
+
+      processedItems.push({
+        product_id: productRows[0].id,
+        name,
+        quantity: qty,
+        price,
+        mrp,
+        gst,
+        total
+      });
+    }
+
+    const total_amount = subtotal + tax_amount;
+    const [paymentRows] = await connection.query(
+      `SELECT COALESCE(SUM(amount), 0) AS paid_amount
+       FROM payments
+       WHERE invoice_id=? AND company_id=?`,
+      [id, company_id]
+    );
+    const paymentSum = Number(paymentRows[0]?.paid_amount || 0);
+    const wasMarkedPaid =
+      String(invoiceRows[0]?.status || "").toLowerCase() === "paid";
+    const paidAmount = paymentSum > 0 || !wasMarkedPaid ? paymentSum : total_amount;
+
+    if (paidAmount > total_amount) {
+      await connection.rollback();
+      return res.status(400).json({
+        message: "Invoice total cannot be less than amount already received"
+      });
+    }
+
+    const status =
+      paidAmount >= total_amount && total_amount > 0
+        ? "paid"
+        : paidAmount > 0
+        ? "partial"
+        : "pending";
+
+    await connection.query(
+      `UPDATE invoices
+       SET invoice_date=?, customer_name=?, subtotal=?, tax_amount=?, cgst=?, sgst=?, igst=?, total_amount=?, status=?
+       WHERE id=? AND company_id=?`,
+      [
+        invoice_date,
+        customer_name,
+        subtotal,
+        tax_amount,
+        tax_amount / 2,
+        tax_amount / 2,
+        0,
+        total_amount,
+        status,
+        id,
+        company_id
+      ]
+    );
+
+    await connection.query(
+      "DELETE FROM invoice_items WHERE invoice_id=? AND company_id=?",
+      [id, company_id]
+    );
+
+    for (const item of processedItems) {
+      await connection.query(
+        `INSERT INTO invoice_items
+        (invoice_id, company_id, item_name, quantity, unit_price, mrp, total_price, gst_rate)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, company_id, item.name, item.quantity, item.price, item.mrp, item.total, item.gst]
+      );
+
+      await connection.query(
+        "UPDATE products SET stock = stock - ? WHERE id=? AND company_id=?",
+        [item.quantity, item.product_id, company_id]
+      );
+    }
+
+    await connection.commit();
+    res.json({ message: "Invoice updated", status });
+  } catch (error) {
+    await connection.rollback();
+    console.error("Update invoice error:", error);
+    res.status(500).json({ message: "Server error", error: error.message });
+  } finally {
+    connection.release();
+  }
+};
+
+/**
+ * ===============================
+ * 🔄 UPDATE STATUS
+ * ===============================
+ */
+exports.updateInvoiceStatus = async (req, res) => {
+  const { id } = req.params;
+  const requestedStatus = String(req.body.status || "").toLowerCase();
+  const statusMap = {
+    paid: "paid",
+    pending: "pending",
+    partial: "partial",
+    "partial paid": "partial"
+  };
+  const status = statusMap[requestedStatus];
+  const company_id = req.user.company_id;
+
+  if (!status) {
+    return res.status(400).json({ message: "Invalid invoice status" });
+  }
+
+  await ensureInvoiceStatusColumn();
+
+  const [result] = await db.query(
+    "UPDATE invoices SET status=? WHERE id=? AND company_id=?",
+    [status, id, company_id]
+  );
+
+  if (result.affectedRows === 0) {
+    return res.status(404).json({ message: "Invoice not found" });
+  }
+
+  res.json({ message: "Status updated" });
+};
+
+/**
+ * ===============================
+ * 📄 GENERATE PDF (BASIC)
+ * ===============================
+ */
+exports.generateInvoicePDF = async (req, res) => {
+  res.json({ message: "PDF generation coming soon" });
+};
