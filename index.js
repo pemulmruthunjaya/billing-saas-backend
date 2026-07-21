@@ -524,14 +524,27 @@ app.use(
  * READINESS CHECK
  * =========================================================
  */
-const healthCheckHandler = async (req, res) => {
-  const report = await buildProductionReadinessReport();
-
-  res.status(report.success ? 200 : 503).json(report);
+const livenessCheckHandler = (req, res) => {
+  res.status(200).json({
+    success: true,
+    status: "ok",
+    checkedAt: new Date().toISOString(),
+    uptimeSeconds: Math.round(process.uptime()),
+  });
 };
 
-app.get("/api/health", healthCheckHandler);
-app.get("/health", healthCheckHandler);
+const readinessCheckHandler = async (req, res, next) => {
+  try {
+    const report = await buildProductionReadinessReport();
+
+    res.status(report.success ? 200 : 503).json(report);
+  } catch (error) {
+    next(error);
+  }
+};
+
+app.get("/health", livenessCheckHandler);
+app.get("/api/health", readinessCheckHandler);
 
 /**
  * =========================================================
