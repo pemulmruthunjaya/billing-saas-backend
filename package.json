@@ -10,7 +10,8 @@
     "audit:backup": "node scripts/audit-backup-readiness.js",
     "audit:payroll": "node scripts/audit-payroll-accounting.js",
     "audit:production": "node scripts/audit-production-readiness.js",
-    "env:production": "node scripts/generate-production-env.js"
+    "env:production": "node scripts/generate-production-env.js",
+    "reset:user-password": "node scripts/reset-user-password.js"
   },
   "keywords": [],
   "author": "",
@@ -23,6 +24,7 @@
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
     "mysql2": "^3.16.1",
+    "nodemailer": "^7.0.13",
     "pdfkit": "^0.17.2"
   },
   "devDependencies": {

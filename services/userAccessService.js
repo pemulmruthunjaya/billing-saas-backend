@@ -154,6 +154,28 @@ const ensureUserAccessColumns = async () => {
     await db.query("ALTER TABLE users ADD COLUMN last_login_at DATETIME NULL");
   }
 
+  if (!existingColumns.has("must_change_password")) {
+    await db.query(
+      "ALTER TABLE users ADD COLUMN must_change_password TINYINT(1) NOT NULL DEFAULT 0"
+    );
+  }
+
+  if (!existingColumns.has("password_reset_token_hash")) {
+    await db.query(
+      "ALTER TABLE users ADD COLUMN password_reset_token_hash CHAR(64) NULL"
+    );
+  }
+
+  if (!existingColumns.has("password_reset_expires_at")) {
+    await db.query(
+      "ALTER TABLE users ADD COLUMN password_reset_expires_at DATETIME NULL"
+    );
+  }
+
+  if (!existingColumns.has("password_changed_at")) {
+    await db.query("ALTER TABLE users ADD COLUMN password_changed_at DATETIME NULL");
+  }
+
   usersAccessReady = true;
 };
 

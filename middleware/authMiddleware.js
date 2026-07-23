@@ -24,7 +24,8 @@ module.exports = async (req, res, next) => {
     await ensureUserAccessColumns();
 
     const [users] = await db.query(
-      `SELECT id, name, email, role, access_role, permissions, is_active, company_id
+      `SELECT id, name, email, role, access_role, permissions, is_active, company_id,
+              must_change_password, password_changed_at
        FROM users
        WHERE id = ? AND company_id = ?
        LIMIT 1`,
@@ -53,7 +54,19 @@ module.exports = async (req, res, next) => {
         user.role === "owner" ? "owner" : user.access_role || "sales"
       ),
       is_active: Number(user.is_active),
+      must_change_password: Number(user.must_change_password) === 1,
+      password_changed_at: user.password_changed_at,
     };
+
+    if (
+      req.user.must_change_password &&
+      !req.originalUrl.endsWith("/api/auth/change-password")
+    ) {
+      return res.status(403).json({
+        message: "You must change your temporary password before continuing",
+        code: "PASSWORD_CHANGE_REQUIRED",
+      });
+    }
 
     next();
   } catch (error) {

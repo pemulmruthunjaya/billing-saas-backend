@@ -1,5 +1,7 @@
 const db = require("../db/connection");
 const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
+const { sendStaffInvitation } = require("../services/emailService");
 const {
   ensureUserAccessColumns,
   getDefaultPermissions,
@@ -28,7 +30,7 @@ exports.createStaff = async (req, res) => {
   try {
     await ensureUserAccessColumns();
 
-    const { name, email, password, access_role, permissions } = req.body;
+    const { name, email, access_role, permissions } = req.body;
     const normalizedEmail = String(email || "").trim().toLowerCase();
     const normalizedAccessRole = normalizeAccessRole(access_role);
     const normalizedPermissions = normalizePermissions(
@@ -36,15 +38,9 @@ exports.createStaff = async (req, res) => {
       normalizedAccessRole
     );
 
-    if (!name || !normalizedEmail || !password) {
+    if (!name || !normalizedEmail) {
       return res.status(400).json({
-        message: "name, email, password are required"
-      });
-    }
-
-    if (String(password).length < 8) {
-      return res.status(400).json({
-        message: "Password must be at least 8 characters"
+        message: "name and email are required"
       });
     }
 
@@ -59,12 +55,13 @@ exports.createStaff = async (req, res) => {
       });
     }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+    const temporaryPassword = `Bs!${crypto.randomBytes(9).toString("base64url")}`;
+    const hashedPassword = await bcrypt.hash(temporaryPassword, 10);
 
-    await db.query(
+    const [result] = await db.query(
       `INSERT INTO users
-        (name, email, password, role, access_role, permissions, is_active, company_id)
-       VALUES (?, ?, ?, 'staff', ?, ?, 1, ?)`,
+        (name, email, password, role, access_role, permissions, is_active, company_id, must_change_password)
+       VALUES (?, ?, ?, 'staff', ?, ?, 1, ?, 1)`,
       [
         name,
         normalizedEmail,
@@ -75,10 +72,22 @@ exports.createStaff = async (req, res) => {
       ]
     );
 
+    const delivery = await sendStaffInvitation({
+      name,
+      email: normalizedEmail,
+      temporaryPassword,
+    });
+
     res.status(201).json({
-      message: "Staff user created successfully",
+      message: delivery.sent
+        ? "Staff user created and login details emailed"
+        : "Staff user created. Share the temporary password manually.",
+      id: result.insertId,
       access_role: normalizedAccessRole,
       permissions: normalizedPermissions,
+      email_sent: delivery.sent,
+      email_status: delivery.sent ? "sent" : delivery.reason,
+      ...(delivery.sent ? {} : { temporary_password: temporaryPassword }),
     });
 
   } catch (error) {
