@@ -189,6 +189,181 @@ exports.getCustomers = async (req, res) => {
   }
 };
 
+exports.getCustomer = async (req, res) => {
+  try {
+    if (!req.user?.company_id) {
+      return res.status(401).json({ message: "Invalid token" });
+    }
+
+    await ensureCustomerPartySchema();
+    const [customers] = await db.query(
+      "SELECT * FROM customers WHERE id = ? AND company_id = ? LIMIT 1",
+      [req.params.id, req.user.company_id]
+    );
+    if (!customers.length) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    const [bankAccounts] = await db.query(
+      `SELECT id, account_holder_name, bank_name, account_number,
+              ifsc_code, branch_name, is_primary
+       FROM customer_bank_accounts
+       WHERE customer_id = ? AND company_id = ?
+       ORDER BY is_primary DESC, id ASC`,
+      [req.params.id, req.user.company_id]
+    );
+
+    return res.json({
+      ...customers[0],
+      bank_accounts: bankAccounts.map((account) => ({
+        ...account,
+        is_primary: Number(account.is_primary) === 1,
+      })),
+    });
+  } catch (error) {
+    console.error("Get customer error:", error);
+    return res.status(500).json({ message: "Failed to fetch customer" });
+  }
+};
+
+exports.updateCustomer = async (req, res) => {
+  let connection;
+
+  try {
+    if (!req.user?.company_id) {
+      return res.status(401).json({ message: "Invalid token" });
+    }
+
+    await ensureCustomerPartySchema();
+    const name = String(req.body.name || "").trim();
+    const email = nullable(req.body.email)?.toLowerCase() || null;
+    const phone = nullable(req.body.phone);
+    const gstin = String(req.body.gstin || "").trim().toUpperCase();
+    const panNumber = String(req.body.pan_number || "").trim().toUpperCase();
+    const billingAddress = nullable(req.body.billing_address || req.body.address);
+    const shippingAddress =
+      req.body.same_as_billing !== false
+        ? billingAddress
+        : nullable(req.body.shipping_address);
+    const openingBalanceType =
+      req.body.opening_balance_type === "to_pay" ? "to_pay" : "to_collect";
+    const creditPeriodDays = Math.max(
+      0,
+      Number.parseInt(req.body.credit_period_days, 10) || 0
+    );
+    const bankAccounts = normalizeBankAccounts(req.body.bank_accounts);
+
+    if (!name) {
+      return res.status(400).json({ message: "Party name is required" });
+    }
+    if (gstin && !GSTIN_PATTERN.test(gstin)) {
+      return res.status(400).json({ message: "Enter a valid 15-character GSTIN" });
+    }
+    if (panNumber && !PAN_PATTERN.test(panNumber)) {
+      return res.status(400).json({ message: "Enter a valid PAN number" });
+    }
+    if (gstin && panNumber && gstin.slice(2, 12) !== panNumber) {
+      return res.status(400).json({ message: "PAN does not match the GSTIN" });
+    }
+    if (bankAccounts.some((account) => !account.bank_name || !account.account_number)) {
+      return res.status(400).json({
+        message: "Bank name and account number are required for each bank account",
+      });
+    }
+    if (
+      bankAccounts.some(
+        (account) => account.ifsc_code && !IFSC_PATTERN.test(account.ifsc_code)
+      )
+    ) {
+      return res.status(400).json({ message: "Enter a valid IFSC code" });
+    }
+
+    const [existing] = await db.query(
+      "SELECT id FROM customers WHERE id = ? AND company_id = ? LIMIT 1",
+      [req.params.id, req.user.company_id]
+    );
+    if (!existing.length) {
+      return res.status(404).json({ message: "Customer not found" });
+    }
+
+    if (gstin) {
+      const [duplicates] = await db.query(
+        `SELECT id FROM customers
+         WHERE company_id = ? AND gstin = ? AND id <> ? LIMIT 1`,
+        [req.user.company_id, gstin, req.params.id]
+      );
+      if (duplicates.length) {
+        return res.status(409).json({ message: "A customer with this GSTIN already exists" });
+      }
+    }
+
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+    await connection.query(
+      `UPDATE customers SET
+        name = ?, email = ?, phone = ?, address = ?, gstin = ?, pan_number = ?,
+        opening_balance = ?, opening_balance_type = ?, party_category = ?,
+        billing_address = ?, shipping_address = ?, credit_period_days = ?,
+        credit_limit = ?, contact_person_name = ?, contact_person_dob = ?
+       WHERE id = ? AND company_id = ?`,
+      [
+        name,
+        email,
+        phone,
+        billingAddress,
+        gstin || null,
+        panNumber || (gstin ? gstin.slice(2, 12) : null),
+        money(req.body.opening_balance),
+        openingBalanceType,
+        nullable(req.body.party_category),
+        billingAddress,
+        shippingAddress,
+        creditPeriodDays,
+        money(req.body.credit_limit),
+        nullable(req.body.contact_person_name),
+        nullable(req.body.contact_person_dob),
+        req.params.id,
+        req.user.company_id,
+      ]
+    );
+
+    await connection.query(
+      "DELETE FROM customer_bank_accounts WHERE customer_id = ? AND company_id = ?",
+      [req.params.id, req.user.company_id]
+    );
+    for (const account of bankAccounts) {
+      await connection.query(
+        `INSERT INTO customer_bank_accounts (
+          customer_id, company_id, account_holder_name, bank_name,
+          account_number, ifsc_code, branch_name, is_primary
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        [
+          req.params.id,
+          req.user.company_id,
+          account.account_holder_name,
+          account.bank_name,
+          account.account_number,
+          account.ifsc_code || null,
+          account.branch_name,
+          account.is_primary ? 1 : 0,
+        ]
+      );
+    }
+
+    await connection.commit();
+    return res.json({ message: "Customer updated successfully" });
+  } catch (error) {
+    if (connection) await connection.rollback();
+    console.error("Update customer error:", error);
+    return res.status(500).json({
+      message: "Failed to update customer",
+      error: error.message,
+    });
+  } finally {
+    if (connection) connection.release();
+  }
+};
+
 exports.deleteCustomer = async (req, res) => {
   let connection;
   try {
