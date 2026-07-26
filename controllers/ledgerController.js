@@ -1,4 +1,5 @@
 const db = require("../db/connection");
+const { ensureVendorPartySchema } = require("../services/vendorPartyService");
 
 /**
  * =========================================================
@@ -11,10 +12,11 @@ exports.getVendorLedger = async (req, res) => {
 
     const { vendor_id } = req.params;
     const company_id = req.user.company_id;
+    await ensureVendorPartySchema();
 
     const [vendorRows] = await db.query(
       `
-      SELECT id
+      SELECT id, opening_balance, opening_balance_type, created_at
       FROM vendors
       WHERE id = ?
         AND company_id = ?
@@ -76,6 +78,18 @@ exports.getVendorLedger = async (req, res) => {
     }, {});
 
     const entries = [];
+    const vendor = vendorRows[0];
+    const openingBalance = Number(vendor.opening_balance || 0);
+    if (openingBalance > 0) {
+      entries.push({
+        date: vendor.created_at,
+        type: "OPENING BALANCE",
+        reference: "-",
+        debit: vendor.opening_balance_type === "to_collect" ? 0 : openingBalance,
+        credit: vendor.opening_balance_type === "to_collect" ? openingBalance : 0,
+        sortOrder: 0,
+      });
+    }
 
     bills.forEach((bill) => {
       const billAmount = Number(bill.total_amount || 0);
