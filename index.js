@@ -73,6 +73,7 @@ const cashBookRoutes = require("./routes/cashBookRoutes");
 const bankBookRoutes = require("./routes/bankBookRoutes");
 const customerStatementRoutes = require("./routes/customerStatementRoutes");
 const payrollRoutes = require("./routes/payrollRoutes");
+const pettyCashRoutes = require("./routes/pettyCashRoutes");
 
 /* ================= ACCOUNTING REPORTS ================= */
 const trialBalanceRoutes = require(
@@ -339,6 +340,12 @@ app.use(
     readOnlyRoles: ["auditor"],
   }),
   expenseRoutes
+);
+
+app.use(
+  "/api/petty-cash",
+  authMiddleware,
+  pettyCashRoutes
 );
 
 app.use(

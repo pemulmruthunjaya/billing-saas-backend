@@ -11,6 +11,7 @@
     "audit:payroll": "node scripts/audit-payroll-accounting.js",
     "audit:production": "node scripts/audit-production-readiness.js",
     "env:production": "node scripts/generate-production-env.js",
+    "init:petty-cash": "node scripts/init-petty-cash.js",
     "reset:user-password": "node scripts/reset-user-password.js"
   },
   "keywords": [],
@@ -23,6 +24,7 @@
     "dotenv": "^17.2.3",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
+    "multer": "^2.2.0",
     "mysql2": "^3.16.1",
     "nodemailer": "^7.0.13",
     "pdfkit": "^0.17.2"

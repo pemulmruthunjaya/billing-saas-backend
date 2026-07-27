@@ -1,5 +1,6 @@
 .env
 node_modules/
+.npm-cache/
 backups/
 npm-debug.log*
 dist/

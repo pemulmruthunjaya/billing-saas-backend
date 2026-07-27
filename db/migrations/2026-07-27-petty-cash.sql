@@ -1,0 +1,10 @@
+-- Petty Cash schema is created automatically by services/pettyCashService.js.
+-- This migration documents the five module tables for deployment review:
+-- petty_cash_settings
+-- petty_cash_user_permissions
+-- petty_cash_transactions
+-- petty_cash_attachments
+-- petty_cash_workflow_history
+--
+-- Run once with the application's configured MySQL connection:
+-- node scripts/init-petty-cash.js
