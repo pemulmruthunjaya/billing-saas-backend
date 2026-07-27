@@ -2,6 +2,7 @@ const db = require("../db/connection");
 
 let invoiceStatusColumnReady = false;
 let invoiceMrpColumnsReady = false;
+let invoiceDiscountColumnsReady = false;
 
 const ensureInvoiceStatusColumn = async () => {
   if (invoiceStatusColumnReady) {
@@ -35,6 +36,54 @@ const ensureInvoiceMrpColumns = async () => {
   }
 
   invoiceMrpColumnsReady = true;
+};
+
+const ensureInvoiceDiscountColumns = async () => {
+  if (invoiceDiscountColumnsReady) return;
+
+  const [invoiceColumns] = await db.query("SHOW COLUMNS FROM invoices");
+  const invoiceColumnNames = new Set(invoiceColumns.map((column) => column.Field));
+  if (!invoiceColumnNames.has("discount_amount")) {
+    await db.query(
+      "ALTER TABLE invoices ADD COLUMN discount_amount DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER subtotal"
+    );
+  }
+
+  const [itemColumns] = await db.query("SHOW COLUMNS FROM invoice_items");
+  const itemColumnNames = new Set(itemColumns.map((column) => column.Field));
+  if (!itemColumnNames.has("discount_type")) {
+    await db.query(
+      "ALTER TABLE invoice_items ADD COLUMN discount_type VARCHAR(10) NOT NULL DEFAULT 'AMOUNT' AFTER mrp"
+    );
+  }
+  if (!itemColumnNames.has("discount_value")) {
+    await db.query(
+      "ALTER TABLE invoice_items ADD COLUMN discount_value DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER discount_type"
+    );
+  }
+  if (!itemColumnNames.has("discount_amount")) {
+    await db.query(
+      "ALTER TABLE invoice_items ADD COLUMN discount_amount DECIMAL(12,2) NOT NULL DEFAULT 0 AFTER discount_value"
+    );
+  }
+
+  invoiceDiscountColumnsReady = true;
+};
+
+const calculateItemDiscount = (item, grossAmount) => {
+  const discountType =
+    String(item.discount_type || "AMOUNT").toUpperCase() === "PERCENT"
+      ? "PERCENT"
+      : "AMOUNT";
+  const rawValue = Math.max(0, Number(item.discount_value ?? item.discount ?? 0));
+  const discountValue =
+    discountType === "PERCENT" ? Math.min(rawValue, 100) : rawValue;
+  const discountAmount =
+    discountType === "PERCENT"
+      ? (grossAmount * discountValue) / 100
+      : Math.min(discountValue, grossAmount);
+
+  return { discountType, discountValue, discountAmount };
 };
 
 /**
@@ -98,6 +147,7 @@ const generateInvoiceNumber = async (company_id) => {
 exports.createInvoice = async (req, res) => {
   try {
     await ensureInvoiceMrpColumns();
+    await ensureInvoiceDiscountColumns();
 
     console.log("📥 Incoming Payload:", req.body);
 
@@ -112,6 +162,7 @@ exports.createInvoice = async (req, res) => {
     const invoice_number = await generateInvoiceNumber(company_id);
 
     let subtotal = 0;
+    let discount_amount = 0;
     let tax_amount = 0;
 
     const processedItems = [];
@@ -151,10 +202,13 @@ exports.createInvoice = async (req, res) => {
       const gst = Number(item.gst_rate || 0);
 
       const base = qty * price;
-      const gstAmount = (base * gst) / 100;
-      const total = base + gstAmount;
+      const discount = calculateItemDiscount(item, base);
+      const taxableBase = base - discount.discountAmount;
+      const gstAmount = (taxableBase * gst) / 100;
+      const total = taxableBase + gstAmount;
 
       subtotal += base;
+      discount_amount += discount.discountAmount;
       tax_amount += gstAmount;
 
       processedItems.push({
@@ -163,6 +217,9 @@ exports.createInvoice = async (req, res) => {
         quantity: qty,
         price,
         mrp,
+        discount_type: discount.discountType,
+        discount_value: discount.discountValue,
+        discount_amount: discount.discountAmount,
         gst,
         total
       });
@@ -171,13 +228,13 @@ exports.createInvoice = async (req, res) => {
     const cgst = tax_amount / 2;
     const sgst = tax_amount / 2;
     const igst = 0;
-    const total_amount = subtotal + tax_amount;
+    const total_amount = subtotal - discount_amount + tax_amount;
 
     // ✅ INSERT INVOICE
     const [invoiceResult] = await db.query(
       `INSERT INTO invoices 
-      (company_id, created_by, invoice_number, invoice_date, customer_name, subtotal, tax_amount, cgst, sgst, igst, total_amount)
-      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      (company_id, created_by, invoice_number, invoice_date, customer_name, subtotal, discount_amount, tax_amount, cgst, sgst, igst, total_amount)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         company_id,
         created_by,
@@ -185,6 +242,7 @@ exports.createInvoice = async (req, res) => {
         invoice_date,
         customer_name,
         subtotal,
+        discount_amount,
         tax_amount,
         cgst,
         sgst,
@@ -199,8 +257,8 @@ exports.createInvoice = async (req, res) => {
     for (let item of processedItems) {
       await db.query(
         `INSERT INTO invoice_items 
-        (invoice_id, company_id, item_name, quantity, unit_price, mrp, total_price, gst_rate)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        (invoice_id, company_id, item_name, quantity, unit_price, mrp, discount_type, discount_value, discount_amount, total_price, gst_rate)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         [
           invoice_id,
           company_id,
@@ -208,6 +266,9 @@ exports.createInvoice = async (req, res) => {
           item.quantity,
           item.price,
           item.mrp,
+          item.discount_type,
+          item.discount_value,
+          item.discount_amount,
           item.total,
           item.gst
         ]
@@ -404,6 +465,7 @@ exports.updateInvoice = async (req, res) => {
 
   try {
     await ensureInvoiceMrpColumns();
+    await ensureInvoiceDiscountColumns();
 
     const { id } = req.params;
     const company_id = req.user.company_id;
@@ -439,6 +501,7 @@ exports.updateInvoice = async (req, res) => {
     }
 
     let subtotal = 0;
+    let discount_amount = 0;
     let tax_amount = 0;
     const processedItems = [];
 
@@ -472,10 +535,13 @@ exports.updateInvoice = async (req, res) => {
       }
 
       const base = qty * price;
-      const gstAmount = (base * gst) / 100;
-      const total = base + gstAmount;
+      const discount = calculateItemDiscount(item, base);
+      const taxableBase = base - discount.discountAmount;
+      const gstAmount = (taxableBase * gst) / 100;
+      const total = taxableBase + gstAmount;
 
       subtotal += base;
+      discount_amount += discount.discountAmount;
       tax_amount += gstAmount;
 
       processedItems.push({
@@ -484,12 +550,15 @@ exports.updateInvoice = async (req, res) => {
         quantity: qty,
         price,
         mrp,
+        discount_type: discount.discountType,
+        discount_value: discount.discountValue,
+        discount_amount: discount.discountAmount,
         gst,
         total
       });
     }
 
-    const total_amount = subtotal + tax_amount;
+    const total_amount = subtotal - discount_amount + tax_amount;
     const [paymentRows] = await connection.query(
       `SELECT COALESCE(SUM(amount), 0) AS paid_amount
        FROM payments
@@ -517,12 +586,13 @@ exports.updateInvoice = async (req, res) => {
 
     await connection.query(
       `UPDATE invoices
-       SET invoice_date=?, customer_name=?, subtotal=?, tax_amount=?, cgst=?, sgst=?, igst=?, total_amount=?, status=?
+       SET invoice_date=?, customer_name=?, subtotal=?, discount_amount=?, tax_amount=?, cgst=?, sgst=?, igst=?, total_amount=?, status=?
        WHERE id=? AND company_id=?`,
       [
         invoice_date,
         customer_name,
         subtotal,
+        discount_amount,
         tax_amount,
         tax_amount / 2,
         tax_amount / 2,
@@ -542,9 +612,9 @@ exports.updateInvoice = async (req, res) => {
     for (const item of processedItems) {
       await connection.query(
         `INSERT INTO invoice_items
-        (invoice_id, company_id, item_name, quantity, unit_price, mrp, total_price, gst_rate)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, company_id, item.name, item.quantity, item.price, item.mrp, item.total, item.gst]
+        (invoice_id, company_id, item_name, quantity, unit_price, mrp, discount_type, discount_value, discount_amount, total_price, gst_rate)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        [id, company_id, item.name, item.quantity, item.price, item.mrp, item.discount_type, item.discount_value, item.discount_amount, item.total, item.gst]
       );
 
       await connection.query(
