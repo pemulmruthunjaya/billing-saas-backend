@@ -258,7 +258,7 @@ const createReceipt = async (body, user) => {
     let outstanding = 0;
     let receivedFromAccount = null;
 
-    if (receiptType === "CUSTOMER" || receiptType === "ADVANCE") {
+    if (body.customer_id) {
       const [customers] = await connection.query(
         "SELECT id, name FROM customers WHERE id = ? AND company_id = ? LIMIT 1 FOR UPDATE",
         [body.customer_id, companyId]
