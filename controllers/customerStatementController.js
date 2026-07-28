@@ -1,4 +1,5 @@
 const db = require("../db/connection");
+const { ensureReceiptEntrySchema } = require("../services/receiptEntryService");
 
 /**
  * =========================================================
@@ -8,6 +9,7 @@ const db = require("../db/connection");
 
 exports.getCustomerStatement = async (req, res) => {
   try {
+    await ensureReceiptEntrySchema();
     const {
       customer_id,
       from_date,
@@ -113,10 +115,14 @@ exports.getCustomerStatement = async (req, res) => {
         p.id,
         p.payment_date,
         p.amount,
-        p.invoice_id
+        p.invoice_id,
+        re.receipt_number
       FROM payments p
       INNER JOIN invoices i
         ON p.invoice_id = i.id
+      LEFT JOIN receipt_entries re
+        ON re.id = p.receipt_entry_id
+       AND re.company_id = p.company_id
       WHERE i.customer_name = ?
       AND i.company_id = ?
       AND p.company_id = ?
@@ -124,6 +130,24 @@ exports.getCustomerStatement = async (req, res) => {
       ORDER BY p.payment_date ASC
       `,
       [customerName, company_id, company_id, ...paymentParams.slice(2)]
+    );
+
+    const advanceParams = [customer_id, company_id];
+    let advanceFilter = "";
+    if (from_date && to_date) {
+      advanceFilter = "AND re.receipt_date BETWEEN ? AND ?";
+      advanceParams.push(from_date, to_date);
+    }
+    const [advanceRows] = await db.query(
+      `SELECT ca.id, re.receipt_date, re.receipt_number,
+              ca.original_amount, ca.unapplied_amount, ca.status
+       FROM customer_advances ca
+       INNER JOIN receipt_entries re
+         ON re.id = ca.receipt_entry_id AND re.company_id = ca.company_id
+       WHERE ca.customer_id = ? AND ca.company_id = ?
+       ${advanceFilter}
+       ORDER BY re.receipt_date, ca.id`,
+      advanceParams
     );
 
     /**
@@ -163,10 +187,22 @@ exports.getCustomerStatement = async (req, res) => {
     paymentRows.forEach((payment) => {
       transactions.push({
         date: payment.payment_date,
-        voucher_no: `PAY-${payment.id}`,
+        voucher_no: payment.receipt_number || `PAY-${payment.id}`,
         type: "PAYMENT",
         debit: 0,
         credit: Number(payment.amount || 0)
+      });
+    });
+
+    advanceRows.forEach((advance) => {
+      transactions.push({
+        date: advance.receipt_date,
+        voucher_no: advance.receipt_number,
+        type: "ADVANCE RECEIPT",
+        debit: 0,
+        credit: Number(advance.original_amount || 0),
+        unapplied_amount: Number(advance.unapplied_amount || 0),
+        advance_status: advance.status,
       });
     });
 

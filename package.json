@@ -13,6 +13,7 @@
     "env:production": "node scripts/generate-production-env.js",
     "init:petty-cash": "node scripts/init-petty-cash.js",
     "test:recurring-invoices": "node tests/recurringDateUtils.test.js",
+    "test:receipt-entry": "node tests/receiptEntryService.test.js",
     "reset:user-password": "node scripts/reset-user-password.js"
   },
   "keywords": [],

@@ -25,11 +25,15 @@ exports.getCashBook = async (req, res) => {
         const [cashAccounts] = await db.query(
 
             `
-            SELECT id
-            FROM accounts
-            WHERE LOWER(account_name) = 'cash'
-            AND company_id = ?
-            LIMIT 1
+            SELECT a.id
+            FROM accounts a
+            LEFT JOIN accounts p
+              ON p.id = a.parent_account_id AND p.company_id = a.company_id
+            WHERE a.company_id = ?
+              AND a.status = 1
+              AND a.account_type = 'ASSET'
+              AND LOWER(CONCAT_WS(' ', a.account_name, p.account_name, a.description))
+                  REGEXP 'cash|petty cash'
             `,
             [company_id]
 
@@ -48,8 +52,8 @@ exports.getCashBook = async (req, res) => {
 
         }
 
-        const cashAccountId =
-            cashAccounts[0].id;
+        const cashAccountIds = cashAccounts.map((account) => account.id);
+        const accountPlaceholders = cashAccountIds.map(() => "?").join(",");
 
         /**
          * =====================================================
@@ -59,7 +63,7 @@ exports.getCashBook = async (req, res) => {
 
         let dateFilter = "";
 
-        const params = [cashAccountId, company_id];
+        const params = [...cashAccountIds, company_id];
 
         if (
             from_date &&
@@ -93,6 +97,7 @@ exports.getCashBook = async (req, res) => {
                 je.journal_no,
                 je.journal_date,
                 je.narration,
+                a.account_name,
 
                 jed.debit,
                 jed.credit
@@ -101,9 +106,12 @@ exports.getCashBook = async (req, res) => {
 
             INNER JOIN journal_entries je
                 ON je.id = jed.journal_entry_id
+            INNER JOIN accounts a
+                ON a.id = jed.account_id
+               AND a.company_id = je.company_id
 
             WHERE
-                jed.account_id = ?
+                jed.account_id IN (${accountPlaceholders})
                 AND je.company_id = ?
                 ${dateFilter}
 
@@ -153,6 +161,9 @@ exports.getCashBook = async (req, res) => {
 
                     narration:
                         row.narration,
+
+                    account_name:
+                        row.account_name,
 
                     receipt:
                         debit,

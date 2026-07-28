@@ -11,7 +11,9 @@ const authMiddleware = require("../middleware/authMiddleware");
 
 const {
     createReceiptEntry,
-    getReceiptEntryById
+    getReceiptEntryById,
+    getReceiptOptions,
+    getCustomerInvoices
 } = require(
     "../controllers/receiptEntryController"
 );
@@ -26,6 +28,18 @@ router.post(
     "/",
     authMiddleware,
     createReceiptEntry
+);
+
+router.get(
+    "/options",
+    authMiddleware,
+    getReceiptOptions
+);
+
+router.get(
+    "/customers/:customerId/invoices",
+    authMiddleware,
+    getCustomerInvoices
 );
 
 router.get(
