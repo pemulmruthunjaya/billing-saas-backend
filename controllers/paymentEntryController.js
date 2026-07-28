@@ -41,6 +41,7 @@ exports.createPaymentEntry = async (req, res) => {
         const {
             payment_date,
             paid_from_account_id,
+            vendor_id,
             paid_to_account_id,
             amount,
             narration
@@ -54,13 +55,14 @@ exports.createPaymentEntry = async (req, res) => {
         if (
             !payment_date ||
             !paid_from_account_id ||
+            !vendor_id ||
             !paid_to_account_id ||
             !amount
         ) {
 
             return res.status(400).json({
                 success: false,
-                message: "All fields are required"
+                message: !vendor_id ? "Vendor is required" : "All fields are required"
             });
 
         }
@@ -76,6 +78,22 @@ exports.createPaymentEntry = async (req, res) => {
                     "Paid From and Paid To cannot be same account"
             });
 
+        }
+
+        const [vendors] = await connection.query(
+            `SELECT id, name
+             FROM vendors
+             WHERE id = ? AND company_id = ?
+               AND (status IS NULL OR status <> 'Inactive')
+             LIMIT 1
+             FOR UPDATE`,
+            [vendor_id, company_id]
+        );
+
+        if (!vendors.length) {
+            const error = new Error("Vendor not found for this company");
+            error.status = 400;
+            throw error;
         }
 
         const paymentNo =
@@ -95,10 +113,11 @@ exports.createPaymentEntry = async (req, res) => {
                     narration,
                     total_debit,
                     total_credit,
-                    company_id
+                    company_id,
+                    vendor_id
                 )
                 VALUES
-                (?, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?)
                 `,
 
                 [
@@ -107,7 +126,8 @@ exports.createPaymentEntry = async (req, res) => {
                     narration || null,
                     amount,
                     amount,
-                    company_id
+                    company_id,
+                    vendor_id
                 ]
 
             );
@@ -199,7 +219,7 @@ exports.createPaymentEntry = async (req, res) => {
             error
         );
 
-        return res.status(500).json({
+        return res.status(error.status || 500).json({
 
             success: false,
 
@@ -236,6 +256,8 @@ exports.getPaymentEntryById = async (req, res) => {
                 je.journal_date AS payment_date,
                 je.narration,
                 je.total_debit AS amount,
+                je.vendor_id,
+                v.name AS vendor_name,
                 paid_to.account_id AS paid_to_account_id,
                 paid_to.account_name AS paid_to_account_name,
                 paid_to.account_code AS paid_to_account_code,
@@ -243,6 +265,8 @@ exports.getPaymentEntryById = async (req, res) => {
                 paid_from.account_name AS paid_from_account_name,
                 paid_from.account_code AS paid_from_account_code
             FROM journal_entries je
+            LEFT JOIN vendors v
+              ON v.id = je.vendor_id AND v.company_id = je.company_id
             LEFT JOIN (
                 SELECT
                     jed.journal_entry_id,
