@@ -12,6 +12,7 @@
     "audit:production": "node scripts/audit-production-readiness.js",
     "env:production": "node scripts/generate-production-env.js",
     "init:petty-cash": "node scripts/init-petty-cash.js",
+    "test:recurring-invoices": "node tests/recurringDateUtils.test.js",
     "reset:user-password": "node scripts/reset-user-password.js"
   },
   "keywords": [],
@@ -26,6 +27,7 @@
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.2.0",
     "mysql2": "^3.16.1",
+    "node-cron": "^4.6.0",
     "nodemailer": "^7.0.13",
     "pdfkit": "^0.17.2"
   },

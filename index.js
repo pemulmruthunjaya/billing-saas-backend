@@ -101,6 +101,9 @@ const backupRoutes = require("./routes/backupRoutes");
 const {
   buildProductionReadinessReport,
 } = require("./services/productionReadinessService");
+const {
+  startRecurringInvoiceScheduler,
+} = require("./jobs/recurringInvoiceScheduler");
 
 /**
  * =========================================================
@@ -615,4 +618,5 @@ app.listen(PORT, () => {
     `🚀 ERP Backend running on port ${PORT}`
   );
 
+  startRecurringInvoiceScheduler();
 });

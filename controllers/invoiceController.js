@@ -89,9 +89,9 @@ const calculateItemDiscount = (item, grossAmount) => {
 /**
  * 🔢 AUTO INVOICE NUMBER GENERATOR
  */
-const getNextInvoiceNumberFromExisting = async (company_id, prefix) => {
+const getNextInvoiceNumberFromExisting = async (company_id, prefix, executor = db) => {
   const likePattern = `${prefix}-%`;
-  const [rows] = await db.query(
+  const [rows] = await executor.query(
     `SELECT MAX(CAST(SUBSTRING_INDEX(invoice_number, '-', -1) AS UNSIGNED)) AS max_number
      FROM invoices
      WHERE company_id = ? AND invoice_number LIKE ?`,
@@ -101,28 +101,28 @@ const getNextInvoiceNumberFromExisting = async (company_id, prefix) => {
   return Number(rows[0]?.max_number || 0) + 1;
 };
 
-const generateInvoiceNumber = async (company_id) => {
-  const [settings] = await db.query(
+const generateInvoiceNumber = async (company_id, executor = db) => {
+  const [settings] = await executor.query(
     "SELECT * FROM invoice_settings WHERE company_id=? LIMIT 1",
     [company_id]
   );
 
   if (!settings.length) {
     const prefix = "INV";
-    const nextNumber = await getNextInvoiceNumberFromExisting(company_id, prefix);
+    const nextNumber = await getNextInvoiceNumberFromExisting(company_id, prefix, executor);
 
-    await db.query(
+    await executor.query(
       `INSERT INTO invoice_settings (company_id, prefix, current_number)
        VALUES (?, ?, ?)`,
       [company_id, prefix, nextNumber]
     );
 
-    return generateInvoiceNumber(company_id);
+    return generateInvoiceNumber(company_id, executor);
   }
 
   const { prefix, current_number } = settings[0];
   const nextNumberFromExisting =
-    await getNextInvoiceNumberFromExisting(company_id, prefix);
+    await getNextInvoiceNumberFromExisting(company_id, prefix, executor);
   const invoiceNumberValue = Math.max(
     Number(current_number || 1),
     nextNumberFromExisting
@@ -131,7 +131,7 @@ const generateInvoiceNumber = async (company_id) => {
   const invoiceNumber =
     `${prefix}-${String(invoiceNumberValue).padStart(4, "0")}`;
 
-  await db.query(
+  await executor.query(
     "UPDATE invoice_settings SET current_number = ? WHERE company_id=?",
     [invoiceNumberValue + 1, company_id]
   );
@@ -144,22 +144,29 @@ const generateInvoiceNumber = async (company_id) => {
  * ✅ CREATE INVOICE + STOCK FIX
  * ===============================
  */
-exports.createInvoice = async (req, res) => {
-  try {
-    await ensureInvoiceMrpColumns();
-    await ensureInvoiceDiscountColumns();
+const invoiceCreationError = (message, status = 400) => {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+};
 
-    console.log("📥 Incoming Payload:", req.body);
+const ensureInvoiceCreationSchema = async () => {
+  await ensureInvoiceMrpColumns();
+  await ensureInvoiceDiscountColumns();
+};
 
-    const { invoice_date, customer_name, items } = req.body;
-    const company_id = req.user.company_id;
-    const created_by = req.user.user_id;
+const createInvoiceRecord = async ({ body, user, connection = db }) => {
+    await ensureInvoiceCreationSchema();
+
+    const { invoice_date, customer_name, items } = body;
+    const company_id = user.company_id;
+    const created_by = user.user_id;
 
     if (!invoice_date || !customer_name || !items?.length) {
-      return res.status(400).json({ message: "Missing required fields" });
+      throw invoiceCreationError("Missing required fields");
     }
 
-    const invoice_number = await generateInvoiceNumber(company_id);
+    const invoice_number = await generateInvoiceNumber(company_id, connection);
 
     let subtotal = 0;
     let discount_amount = 0;
@@ -172,28 +179,24 @@ exports.createInvoice = async (req, res) => {
       console.log("👉 Checking item:", item);
 
       if (!item.product_id) {
-        return res.status(400).json({
-          message: `product_id missing for ${item.name}`
-        });
+        throw invoiceCreationError(`product_id missing for ${item.name}`);
       }
 
-      const [productRows] = await db.query(
-        "SELECT stock FROM products WHERE id=? AND company_id=?",
+      const [productRows] = await connection.query(
+        "SELECT stock FROM products WHERE id=? AND company_id=? FOR UPDATE",
         [item.product_id, company_id]
       );
 
       if (!productRows.length) {
-        return res.status(400).json({
-          message: `Product not found: ${item.name}`
-        });
+        throw invoiceCreationError(`Product not found: ${item.name}`);
       }
 
       const availableStock = productRows[0].stock;
 
       if (availableStock < item.quantity) {
-        return res.status(400).json({
-          message: `Insufficient stock for ${item.name}. Available: ${availableStock}`
-        });
+        throw invoiceCreationError(
+          `Insufficient stock for ${item.name}. Available: ${availableStock}`
+        );
       }
 
       const qty = Number(item.quantity || 0);
@@ -231,7 +234,7 @@ exports.createInvoice = async (req, res) => {
     const total_amount = subtotal - discount_amount + tax_amount;
 
     // ✅ INSERT INVOICE
-    const [invoiceResult] = await db.query(
+    const [invoiceResult] = await connection.query(
       `INSERT INTO invoices 
       (company_id, created_by, invoice_number, invoice_date, customer_name, subtotal, discount_amount, tax_amount, cgst, sgst, igst, total_amount)
       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -255,7 +258,7 @@ exports.createInvoice = async (req, res) => {
 
     // ✅ INSERT ITEMS + DEDUCT STOCK
     for (let item of processedItems) {
-      await db.query(
+      await connection.query(
         `INSERT INTO invoice_items 
         (invoice_id, company_id, item_name, quantity, unit_price, mrp, discount_type, discount_value, discount_amount, total_price, gst_rate)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -274,27 +277,35 @@ exports.createInvoice = async (req, res) => {
         ]
       );
 
-      const [updateResult] = await db.query(
+      await connection.query(
         `UPDATE products 
          SET stock = stock - ? 
          WHERE id = ? AND company_id = ?`,
         [item.quantity, item.product_id, company_id]
       );
-
-      console.log("🟢 STOCK UPDATED:", updateResult);
     }
 
-    res.status(201).json({
+    return {
       message: "Invoice created & stock updated ✅",
       invoice_id,
       invoice_number
-    });
+    };
+};
 
+exports.createInvoiceRecord = createInvoiceRecord;
+exports.ensureInvoiceCreationSchema = ensureInvoiceCreationSchema;
+
+exports.createInvoice = async (req, res) => {
+  try {
+    const invoice = await createInvoiceRecord({
+      body: req.body,
+      user: req.user,
+    });
+    res.status(201).json(invoice);
   } catch (error) {
     console.error("❌ CREATE ERROR:", error);
-    res.status(500).json({
-      message: "Server error",
-      error: error.message
+    res.status(error.status || 500).json({
+      message: error.status ? error.message : "Server error",
     });
   }
 };

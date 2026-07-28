@@ -3,6 +3,7 @@ const {
   FREQUENCIES,
   ensureRecurringInvoiceSchema,
   generateRecurringInvoice,
+  getRecurringInvoiceHistory,
   toDateString,
 } = require("../services/recurringInvoiceService");
 
@@ -15,6 +16,10 @@ const normalizePayload = (body = {}) => ({
   start_date: toDateString(body.start_date),
   end_date: toDateString(body.end_date),
   next_invoice_date: toDateString(body.next_invoice_date || body.start_date),
+  max_occurrences:
+    body.max_occurrences === "" || body.max_occurrences === null || body.max_occurrences === undefined
+      ? null
+      : Number(body.max_occurrences),
   auto_email: body.auto_email === true || Number(body.auto_email) === 1 ? 1 : 0,
   status: STATUSES.includes(body.status) ? body.status : "Draft",
   notes: String(body.notes || "").trim() || null,
@@ -28,6 +33,12 @@ const validatePayload = async (payload, companyId) => {
   if (!FREQUENCIES.includes(payload.frequency)) return "Frequency is required";
   if (!Number.isInteger(payload.repeat_every) || payload.repeat_every < 1) {
     return "Repeat every must be at least 1";
+  }
+  if (
+    payload.max_occurrences !== null &&
+    (!Number.isInteger(payload.max_occurrences) || payload.max_occurrences < 1)
+  ) {
+    return "Maximum occurrences must be at least 1";
   }
   if (payload.end_date && payload.end_date < payload.start_date) {
     return "End date cannot be before start date";
@@ -146,8 +157,9 @@ exports.create = async (req, res) => {
     const [result] = await connection.query(
       `INSERT INTO recurring_invoices
        (customer_id, frequency, repeat_every, start_date, end_date,
-        next_invoice_date, auto_email, status, notes, company_id, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        next_invoice_date, max_occurrences, auto_email, status, notes,
+        company_id, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         payload.customer_id,
         payload.frequency,
@@ -155,6 +167,7 @@ exports.create = async (req, res) => {
         payload.start_date,
         payload.end_date,
         payload.next_invoice_date,
+        payload.max_occurrences,
         payload.auto_email,
         payload.status,
         payload.notes,
@@ -186,7 +199,8 @@ exports.update = async (req, res) => {
     const [result] = await connection.query(
       `UPDATE recurring_invoices
        SET customer_id = ?, frequency = ?, repeat_every = ?, start_date = ?,
-           end_date = ?, next_invoice_date = ?, auto_email = ?, status = ?, notes = ?
+           end_date = ?, next_invoice_date = ?, max_occurrences = ?,
+           auto_email = ?, status = ?, notes = ?
        WHERE id = ? AND company_id = ?`,
       [
         payload.customer_id,
@@ -195,6 +209,7 @@ exports.update = async (req, res) => {
         payload.start_date,
         payload.end_date,
         payload.next_invoice_date,
+        payload.max_occurrences,
         payload.auto_email,
         payload.status,
         payload.notes,
@@ -264,4 +279,49 @@ const setStatus = (status) => async (req, res) => {
 
 exports.pause = setStatus("Paused");
 exports.resume = setStatus("Active");
-exports.generateRecurringInvoice = generateRecurringInvoice;
+
+exports.generate = async (req, res) => {
+  try {
+    const result = await generateRecurringInvoice(req.params.id, req.user);
+    if (result.already_generated) {
+      return res.status(200).json({
+        ...result,
+        message: "This scheduled occurrence was already generated",
+      });
+    }
+    return res.status(201).json({
+      ...result,
+      message: "Invoice generated successfully",
+    });
+  } catch (error) {
+    console.error("Manual recurring invoice generation failed:", {
+      recurringInvoiceId: req.params.id,
+      companyId: req.user.company_id,
+      code: error.code,
+      message: error.message,
+    });
+    return res.status(error.status || 500).json({
+      message: error.status ? error.message : "Invoice generation failed",
+      code: error.code || "GENERATION_FAILED",
+    });
+  }
+};
+
+exports.history = async (req, res) => {
+  try {
+    const history = await getRecurringInvoiceHistory(
+      req.params.id,
+      req.user.company_id
+    );
+    res.json(history);
+  } catch (error) {
+    console.error("Recurring invoice history failed:", {
+      recurringInvoiceId: req.params.id,
+      companyId: req.user.company_id,
+      code: error.code,
+    });
+    res.status(error.status || 500).json({
+      message: error.status ? error.message : "Failed to load generation history",
+    });
+  }
+};
