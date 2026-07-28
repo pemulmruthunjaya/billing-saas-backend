@@ -44,6 +44,7 @@ const invoiceItemRoutes = require("./routes/invoiceItemRoutes");
 const paymentRoutes = require("./routes/paymentRoutes");
 const invoiceSettingsRoutes = require("./routes/invoiceSettingsRoutes");
 const quotationRoutes = require("./routes/quotationRoutes");
+const recurringInvoiceRoutes = require("./routes/recurringInvoices");
 
 /* ================= PRODUCTS ================= */
 const productRoutes = require("./routes/productRoutes");
@@ -208,6 +209,16 @@ app.use(
     readOnlyRoles: ["purchase", "auditor"],
   }),
   invoiceRoutes
+);
+
+app.use(
+  "/api/recurring-invoices",
+  authMiddleware,
+  allowAccess(["sales", "accountant"], {
+    moduleKey: "invoices",
+    readOnlyRoles: ["auditor"],
+  }),
+  recurringInvoiceRoutes
 );
 
 app.use(
