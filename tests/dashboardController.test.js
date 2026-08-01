@@ -13,7 +13,7 @@ const results = [
   [[{ name: "Rent", value: "100" }]],
   [[{ balance_type: "cash", balance: "220" }, { balance_type: "bank", balance: "780" }]],
   [[{ id: 1, number: "INV-1", due_amount: "300", overdue_days: 4 }]],
-  [[{ id: 2, number: "BILL-1", due_amount: "150", overdue_days: 2 }]],
+  [[{ id: 2, number: null, party: null, due_amount: "150", overdue_days: 2 }]],
   [[{ activity_type: "Receipt", reference: "RCPT-1", amount: "650" }]],
 ];
 
@@ -54,7 +54,18 @@ const run = async () => {
   assert.deepEqual(response.body.data.balances, { cash: 220, bank: 780 });
   assert.equal(response.body.data.sales_purchases[0].sales, 1000);
   assert.equal(response.body.data.overdue.invoice_basis_days, 30);
+  assert.equal(response.body.data.overdue.bills[0].number, "Legacy Bill");
+  assert.equal(response.body.data.overdue.bills[0].party, "Vendor unavailable");
   assert.deepEqual(response.body.data.range, { from_date: "2026-08-01", to_date: "2026-08-31" });
+
+  const overdueBillQuery = calls[5].sql;
+  assert.match(overdueBillQuery, /TRIM\(b\.bill_number\).*'Legacy Bill'/s, "bill number must use a clear legacy fallback");
+  assert.match(overdueBillQuery, /TRIM\(v\.name\).*'Vendor unavailable'/s, "missing vendors need a clear label");
+
+  const activityQuery = calls[6].sql;
+  assert.match(activityQuery, /p\.receipt_entry_id IS NULL/, "linked receipt payments must be suppressed");
+  assert.match(activityQuery, /NOT EXISTS[\s\S]*receipt_entries linked_receipt/, "linked receipt journals must be suppressed");
+  assert.doesNotMatch(activityQuery, /je\.source_type\s*=\s*'manual'/, "standalone manual journals must remain visible");
 
   const beforeInvalid = calls.length;
   const invalid = responseFor();

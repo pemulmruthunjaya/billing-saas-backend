@@ -132,7 +132,10 @@ const getDashboardSnapshot = async (companyId, range) => {
       [to, companyId, to, companyId, to, to]
     ),
     db.query(
-      `SELECT b.id, b.bill_number number, b.due_date date, v.name party,
+      `SELECT b.id,
+              COALESCE(NULLIF(TRIM(b.bill_number),''),'Legacy Bill') number,
+              b.due_date date,
+              COALESCE(NULLIF(TRIM(v.name),''),'Vendor unavailable') party,
               GREATEST(b.total_amount-GREATEST(COALESCE(vpt.paid_amount,0),COALESCE(b.paid_amount,0)),0) due_amount,
               DATEDIFF(?,b.due_date) overdue_days
        FROM bills b
@@ -155,7 +158,8 @@ const getDashboardSnapshot = async (companyId, range) => {
          FROM bills b LEFT JOIN vendors v ON v.id=b.vendor_id AND v.company_id=b.company_id
          WHERE b.company_id=? AND b.bill_date BETWEEN ? AND ?
          UNION ALL
-         SELECT 'Receipt',re.receipt_date,re.receipt_number,COALESCE(c.name,re.receipt_type),re.amount,
+         SELECT 'Receipt',re.receipt_date,re.receipt_number,
+                COALESCE(c.name,CASE WHEN re.receipt_type='CUSTOMER' THEN 'Customer receipt' ELSE 'Receipt entry' END),re.amount,
                 CONCAT('/receipt-entry/',re.id)
          FROM receipt_entries re LEFT JOIN customers c ON c.id=re.customer_id AND c.company_id=re.company_id
          WHERE re.company_id=? AND re.receipt_date BETWEEN ? AND ?
@@ -164,10 +168,17 @@ const getDashboardSnapshot = async (companyId, range) => {
                 i.customer_name,p.amount,CONCAT('/sales/invoice/',p.invoice_id)
          FROM payments p INNER JOIN invoices i ON i.id=p.invoice_id AND i.company_id=p.company_id
          WHERE p.company_id=? AND p.payment_date BETWEEN ? AND ?
+           AND p.receipt_entry_id IS NULL
          UNION ALL
          SELECT 'Journal',je.journal_date,je.journal_no,je.narration,je.total_debit,
                 '/journal-entry-history'
          FROM journal_entries je WHERE je.company_id=? AND je.journal_date BETWEEN ? AND ?
+           AND NOT EXISTS (
+             SELECT 1 FROM receipt_entries linked_receipt
+             WHERE linked_receipt.company_id=je.company_id
+               AND (linked_receipt.journal_entry_id=je.id OR
+                 (linked_receipt.id=je.source_id AND je.source_type IN ('customer_receipt','receipt_entry')))
+           )
        ) activity ORDER BY activity_date DESC, reference DESC LIMIT 12`,
       [
         companyId, from, to, companyId, from, to, companyId, from, to,
@@ -209,7 +220,13 @@ const getDashboardSnapshot = async (companyId, range) => {
     overdue: {
       invoice_basis_days: 30,
       invoices: overdueInvoiceRows.map((row) => ({ ...row, due_amount: numberValue(row.due_amount), overdue_days: numberValue(row.overdue_days) })),
-      bills: overdueBillRows.map((row) => ({ ...row, due_amount: numberValue(row.due_amount), overdue_days: numberValue(row.overdue_days) })),
+      bills: overdueBillRows.map((row) => ({
+        ...row,
+        number: row.number || "Legacy Bill",
+        party: row.party || "Vendor unavailable",
+        due_amount: numberValue(row.due_amount),
+        overdue_days: numberValue(row.overdue_days),
+      })),
     },
     recent_activity: activityRows.map((row) => ({ ...row, amount: numberValue(row.amount) })),
   };
