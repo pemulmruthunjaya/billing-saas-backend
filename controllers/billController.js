@@ -1,4 +1,5 @@
 const db = require("../db/connection");
+const { ensureVendorPaymentSchema } = require("../services/vendorPaymentService");
 
 let billStatusColumnReady = false;
 let billMrpColumnsReady = false;
@@ -183,6 +184,7 @@ exports.createBill = async (req, res) => {
  */
 exports.getBills = async (req, res) => {
   try {
+    await ensureVendorPaymentSchema();
     const company_id = req.user.company_id;
     const { vendor_id } = req.query;
 
@@ -198,18 +200,12 @@ exports.getBills = async (req, res) => {
       SELECT
         b.*,
         v.name AS vendor_name,
+        GREATEST(COALESCE(payment_totals.paid_amount,0),COALESCE(b.paid_amount,0)) AS paid_amount,
+        GREATEST(b.total_amount-GREATEST(COALESCE(payment_totals.paid_amount,0),COALESCE(b.paid_amount,0)),0) AS due_amount,
         CASE
-          WHEN b.status = 'Paid' THEN b.total_amount
-          ELSE COALESCE(payment_totals.paid_amount, 0)
-        END AS paid_amount,
-        GREATEST(
-          b.total_amount -
-          CASE
-            WHEN b.status = 'Paid' THEN b.total_amount
-            ELSE COALESCE(payment_totals.paid_amount, 0)
-          END,
-          0
-        ) AS due_amount
+          WHEN GREATEST(b.total_amount-GREATEST(COALESCE(payment_totals.paid_amount,0),COALESCE(b.paid_amount,0)),0)<=0 THEN 'Paid'
+          WHEN GREATEST(COALESCE(payment_totals.paid_amount,0),COALESCE(b.paid_amount,0))>0 THEN 'Partial Paid'
+          ELSE 'Unpaid' END AS status
       FROM bills b
       LEFT JOIN vendors v
         ON b.vendor_id = v.id
@@ -217,7 +213,7 @@ exports.getBills = async (req, res) => {
        AND (v.status IS NULL OR v.status <> 'Inactive')
       LEFT JOIN (
         SELECT bill_id, company_id, SUM(amount) AS paid_amount
-        FROM vendor_payments
+        FROM vendor_payments WHERE status='SUCCESS'
         GROUP BY bill_id, company_id
       ) payment_totals
         ON payment_totals.bill_id = b.id
@@ -241,6 +237,7 @@ exports.getBills = async (req, res) => {
 exports.getBillById = async (req, res) => {
   try {
     await ensureBillMrpColumns();
+    await ensureVendorPaymentSchema();
 
     const { id } = req.params;
     const company_id = req.user.company_id;
@@ -253,25 +250,19 @@ exports.getBillById = async (req, res) => {
         v.email AS vendor_email,
         v.gst_number AS vendor_gst_number,
         v.address AS vendor_address,
+        GREATEST(COALESCE(payment_totals.paid_amount,0),COALESCE(b.paid_amount,0)) AS paid_amount,
+        GREATEST(b.total_amount-GREATEST(COALESCE(payment_totals.paid_amount,0),COALESCE(b.paid_amount,0)),0) AS due_amount,
         CASE
-          WHEN b.status = 'Paid' THEN b.total_amount
-          ELSE COALESCE(payment_totals.paid_amount, 0)
-        END AS paid_amount,
-        GREATEST(
-          b.total_amount -
-          CASE
-            WHEN b.status = 'Paid' THEN b.total_amount
-            ELSE COALESCE(payment_totals.paid_amount, 0)
-          END,
-          0
-        ) AS due_amount
+          WHEN GREATEST(b.total_amount-GREATEST(COALESCE(payment_totals.paid_amount,0),COALESCE(b.paid_amount,0)),0)<=0 THEN 'Paid'
+          WHEN GREATEST(COALESCE(payment_totals.paid_amount,0),COALESCE(b.paid_amount,0))>0 THEN 'Partial Paid'
+          ELSE 'Unpaid' END AS status
       FROM bills b
       LEFT JOIN vendors v
         ON b.vendor_id = v.id
        AND v.company_id = b.company_id
       LEFT JOIN (
         SELECT bill_id, company_id, SUM(amount) AS paid_amount
-        FROM vendor_payments
+        FROM vendor_payments WHERE status='SUCCESS'
         GROUP BY bill_id, company_id
       ) payment_totals
         ON payment_totals.bill_id = b.id
@@ -498,32 +489,9 @@ exports.updateBill = async (req, res) => {
  * ================= UPDATE BILL STATUS =================
  */
 exports.updateBillStatus = async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { status } = req.body;
-    const company_id = req.user.company_id;
-    const allowedStatuses = ["Unpaid", "Partial Paid", "Paid"];
-
-    if (!allowedStatuses.includes(status)) {
-      return res.status(400).json({ message: "Invalid bill status" });
-    }
-
-    await ensureBillStatusColumn();
-
-    const [result] = await db.query(
-      "UPDATE bills SET status = ? WHERE id = ? AND company_id = ?",
-      [status, id, company_id]
-    );
-
-    if (result.affectedRows === 0) {
-      return res.status(404).json({ message: "Bill not found" });
-    }
-
-    res.json({ message: "Bill status updated" });
-  } catch (error) {
-    console.error("Update bill status error:", error);
-    res.status(500).json({ message: "Server error" });
-  }
+  return res.status(409).json({
+    message: "Bill status is calculated from vendor payments and cannot be changed manually"
+  });
 };
 
 /**
