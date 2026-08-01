@@ -187,13 +187,49 @@ exports.createJournalEntry = async (req, res) => {
 exports.getAllJournalEntries = async (req, res) => {
 
     try {
+        const companyId = req.user.company_id;
+        const search = String(req.query.search || "").trim();
+        const sourceType = String(req.query.source_type || "all").trim().toLowerCase();
+        const dateFrom = String(req.query.date_from || "").trim();
+        const dateTo = String(req.query.date_to || "").trim();
+        const conditions = ["je.company_id = ?"];
+        const params = [companyId];
 
-        const [rows] = await db.execute(`
-            SELECT *
-            FROM journal_entries
-            WHERE company_id = ?
-            ORDER BY id DESC
-        `, [req.user.company_id]);
+        if (dateFrom) {
+            conditions.push("je.journal_date >= ?");
+            params.push(dateFrom);
+        }
+        if (dateTo) {
+            conditions.push("je.journal_date <= ?");
+            params.push(dateTo);
+        }
+        if (sourceType === "manual") {
+            conditions.push("(je.source_type IS NULL OR je.source_type = '' OR je.source_type = 'manual')");
+        } else if (sourceType === "automatic") {
+            conditions.push("je.source_type IS NOT NULL AND je.source_type NOT IN ('', 'manual')");
+        } else if (sourceType !== "all") {
+            conditions.push("LOWER(je.source_type) = ?");
+            params.push(sourceType);
+        }
+        if (search) {
+            conditions.push("(je.journal_no LIKE ? OR je.narration LIKE ?)");
+            const term = `%${search}%`;
+            params.push(term, term);
+        }
+
+        const [rows] = await db.execute(
+            `SELECT je.id, je.journal_no, je.journal_date, je.narration,
+                    je.total_debit, je.total_credit, je.source_type, je.source_id,
+                    CASE
+                      WHEN je.source_type IS NULL OR je.source_type = '' OR je.source_type = 'manual'
+                        THEN 'manual'
+                      ELSE 'automatic'
+                    END AS source_category
+             FROM journal_entries je
+             WHERE ${conditions.join(" AND ")}
+             ORDER BY je.journal_date DESC, je.id DESC`,
+            params
+        );
 
         res.status(200).json({
             success: true,
