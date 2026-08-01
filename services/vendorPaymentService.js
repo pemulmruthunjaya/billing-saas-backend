@@ -92,8 +92,10 @@ const findPayableAccount = async (connection, companyId) => {
   if (existing.length) return existing[0];
   const [result] = await connection.query(
     `INSERT INTO accounts
-     (account_code,account_name,account_type,description,status,company_id)
-     VALUES (?, 'Accounts Payable', 'LIABILITY', 'System vendor control account', 1, ?)`,
+     (account_code,account_name,account_type,opening_balance,balance_type,
+      description,status,company_id)
+     VALUES (?, 'Accounts Payable', 'LIABILITY', 0, 'CREDIT',
+             'System vendor control account', 1, ?)`,
     [code, companyId]
   );
   return { id: result.insertId, account_name: "Accounts Payable" };
@@ -169,11 +171,11 @@ const recordVendorPayment = async (body, user) => {
     const narration = `Vendor payment to ${bill.vendor_name} against ${bill.bill_number}`;
     const [journalResult] = await connection.query(
       `INSERT INTO journal_entries
-       (journal_no,journal_date,narration,total_debit,total_credit,created_by,status,
+       (journal_no,journal_date,narration,total_debit,total_credit,
         company_id,vendor_id,source_type,source_id)
-       VALUES (?,?,?,?,?,?, 'Posted', ?,?,'vendor_payment',?)`,
+       VALUES (?,?,?,?,?,?,?,'vendor_payment',?)`,
       [`VPAY-${String(paymentId).padStart(5,"0")}`,body.payment_date,narration,
-       amount,amount,createdBy,companyId,bill.vendor_id,paymentId]
+       amount,amount,companyId,bill.vendor_id,paymentId]
     );
     const journalId = journalResult.insertId;
     await connection.query(
