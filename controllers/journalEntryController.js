@@ -194,6 +194,11 @@ exports.getAllJournalEntries = async (req, res) => {
         const dateTo = String(req.query.date_to || "").trim();
         const conditions = ["je.company_id = ?"];
         const params = [companyId];
+        const effectiveSourceType = `CASE
+            WHEN re.id IS NOT NULL AND re.receipt_type = 'CUSTOMER' THEN 'customer_receipt'
+            WHEN re.id IS NOT NULL THEN 'receipt_entry'
+            ELSE COALESCE(NULLIF(LOWER(je.source_type), ''), 'manual')
+        END`;
 
         if (dateFrom) {
             conditions.push("je.journal_date >= ?");
@@ -204,11 +209,11 @@ exports.getAllJournalEntries = async (req, res) => {
             params.push(dateTo);
         }
         if (sourceType === "manual") {
-            conditions.push("(je.source_type IS NULL OR je.source_type = '' OR je.source_type = 'manual')");
+            conditions.push(`${effectiveSourceType} = 'manual'`);
         } else if (sourceType === "automatic") {
-            conditions.push("je.source_type IS NOT NULL AND je.source_type NOT IN ('', 'manual')");
+            conditions.push(`${effectiveSourceType} <> 'manual'`);
         } else if (sourceType !== "all") {
-            conditions.push("LOWER(je.source_type) = ?");
+            conditions.push(`${effectiveSourceType} = ?`);
             params.push(sourceType);
         }
         if (search) {
@@ -219,13 +224,15 @@ exports.getAllJournalEntries = async (req, res) => {
 
         const [rows] = await db.execute(
             `SELECT je.id, je.journal_no, je.journal_date, je.narration,
-                    je.total_debit, je.total_credit, je.source_type, je.source_id,
+                    je.total_debit, je.total_credit, ${effectiveSourceType} AS source_type, je.source_id,
                     CASE
-                      WHEN je.source_type IS NULL OR je.source_type = '' OR je.source_type = 'manual'
-                        THEN 'manual'
+                      WHEN ${effectiveSourceType} = 'manual' THEN 'manual'
                       ELSE 'automatic'
                     END AS source_category
              FROM journal_entries je
+             LEFT JOIN receipt_entries re
+               ON re.company_id = je.company_id
+              AND re.journal_entry_id = je.id
              WHERE ${conditions.join(" AND ")}
              ORDER BY je.journal_date DESC, je.id DESC`,
             params
@@ -267,10 +274,18 @@ exports.getSingleJournalEntry = async (req, res) => {
          */
         const [journalRows] = await db.execute(
             `
-            SELECT *
-            FROM journal_entries
-            WHERE id = ?
-            AND company_id = ?
+            SELECT je.*,
+                   CASE
+                     WHEN re.id IS NOT NULL AND re.receipt_type = 'CUSTOMER' THEN 'customer_receipt'
+                     WHEN re.id IS NOT NULL THEN 'receipt_entry'
+                     ELSE COALESCE(NULLIF(LOWER(je.source_type), ''), 'manual')
+                   END AS history_source_type
+            FROM journal_entries je
+            LEFT JOIN receipt_entries re
+              ON re.company_id = je.company_id
+             AND re.journal_entry_id = je.id
+            WHERE je.id = ?
+            AND je.company_id = ?
             `,
             [id, company_id]
         );
@@ -305,7 +320,11 @@ exports.getSingleJournalEntry = async (req, res) => {
 
         res.status(200).json({
             success: true,
-            journal: journalRows[0],
+            journal: {
+                ...journalRows[0],
+                source_type: journalRows[0].history_source_type,
+                history_source_type: undefined
+            },
             details: detailRows
         });
 

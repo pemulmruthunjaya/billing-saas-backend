@@ -32,7 +32,9 @@ const run = async () => {
   assert.equal(response.code, 200);
   assert.equal(response.body.data[0].journal_no, "VPAY-00008");
   assert.ok(calls[0].sql.includes("je.company_id = ?"), "history must be company scoped");
-  assert.ok(calls[0].sql.includes("je.source_type IS NOT NULL"), "automatic filter must exclude manual entries");
+  assert.ok(calls[0].sql.includes("LEFT JOIN receipt_entries re"), "history must recognize linked existing receipts");
+  assert.ok(calls[0].sql.includes("re.receipt_type = 'CUSTOMER' THEN 'customer_receipt'"), "customer receipts need a clear source label");
+  assert.ok(calls[0].sql.includes("<> 'manual'"), "automatic filter must include linked receipts without source metadata");
   assert.ok(calls[0].sql.includes("je.journal_no LIKE ? OR je.narration LIKE ?"), "search must cover voucher and narration");
   assert.deepEqual(calls[0].params, [42, "2026-08-01", "2026-08-02", "%VPAY-00008%", "%VPAY-00008%"]);
   console.log("journal entry history tests passed");

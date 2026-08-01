@@ -2,6 +2,7 @@ const assert = require("node:assert/strict");
 const {
   isCashBankAccount,
   isOtherCreditAccount,
+  receiptJournalSourceType,
 } = require("../services/receiptEntryService");
 
 const account = (account_name, account_type, parent_account_name = "") => ({
@@ -26,4 +27,8 @@ assert.equal(isOtherCreditAccount(account("Salary Payable", "LIABILITY")), false
 assert.equal(isOtherCreditAccount(account("Cash in Hand", "ASSET")), false);
 assert.equal(isOtherCreditAccount(account("Office Expense", "EXPENSE")), false);
 
-console.log("Receipt account classification: 13 checks passed");
+assert.equal(receiptJournalSourceType("CUSTOMER"), "customer_receipt");
+assert.equal(receiptJournalSourceType("OTHER"), "receipt_entry");
+assert.equal(receiptJournalSourceType("ADVANCE"), "receipt_entry");
+
+console.log("Receipt account and journal-source classification: 16 checks passed");

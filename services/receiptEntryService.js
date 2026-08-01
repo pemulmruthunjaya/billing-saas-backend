@@ -6,6 +6,8 @@ const CASH_PATTERN = /(cash|petty cash)/i;
 const BANK_PATTERN = /(bank|current account|savings account)/i;
 const EXCLUDED_CREDIT_PATTERN =
   /(cash|bank|salary|wages|expense|purchase|receivable|debtor)/i;
+const receiptJournalSourceType = (receiptType) =>
+  receiptType === "CUSTOMER" ? "customer_receipt" : "receipt_entry";
 
 let schemaReady = false;
 
@@ -376,8 +378,9 @@ const createReceipt = async (body, user) => {
 
     const [journalResult] = await connection.query(
       `INSERT INTO journal_entries
-       (journal_no, journal_date, narration, total_debit, total_credit, company_id)
-       VALUES (?, ?, ?, ?, ?, ?)`,
+       (journal_no, journal_date, narration, total_debit, total_credit, company_id,
+        source_type, source_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         receiptNumber,
         body.receipt_date,
@@ -385,6 +388,8 @@ const createReceipt = async (body, user) => {
         amount,
         amount,
         companyId,
+        receiptJournalSourceType(receiptType),
+        receiptId,
       ]
     );
     const journalId = journalResult.insertId;
@@ -490,4 +495,5 @@ module.exports = {
   isCashBankAccount,
   isOtherCreditAccount,
   listAccountOptions,
+  receiptJournalSourceType,
 };
