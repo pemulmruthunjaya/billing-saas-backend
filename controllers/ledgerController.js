@@ -231,8 +231,16 @@ exports.getAccountLedger = async (req, res) => {
      * OPENING BALANCE
      * =====================================================
      */
-    let openingBalance =
-      Number(account.opening_balance || 0);
+    const [openingEventRows] = await db.query(
+      `SELECT COALESCE(SUM(signed_delta),0) event_delta
+       FROM opening_balance_events
+       WHERE company_id=? AND entity_type='account' AND entity_id=?`,
+      [company_id, account_id]
+    );
+    const storedOpening = String(account.balance_type).toUpperCase() === "CREDIT"
+      ? -Number(account.opening_balance || 0)
+      : Number(account.opening_balance || 0);
+    let openingBalance = storedOpening - Number(openingEventRows[0]?.event_delta || 0);
 
     /**
      * =====================================================

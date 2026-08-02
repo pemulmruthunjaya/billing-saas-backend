@@ -1,5 +1,9 @@
 const db = require("../db/connection");
 const { ensureVendorPartySchema } = require("../services/vendorPartyService");
+const {
+  recordOpeningBalanceEvent,
+  resolvePartyControlAccount,
+} = require("../services/openingBalanceService");
 
 const GSTIN = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
 const PAN = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
@@ -103,6 +107,20 @@ exports.createVendor = async (req, res) => {
        party.shipping, party.creditDays, party.creditLimit, party.contactName,
        party.contactDob]
     );
+    if (party.opening) {
+      const targetAccount = await resolvePartyControlAccount(
+        connection, req.user.company_id, "vendor", party.openingType
+      );
+      await recordOpeningBalanceEvent({
+        connection,
+        companyId: req.user.company_id,
+        entityType: "vendor",
+        entityId: result.insertId,
+        targetAccount,
+        newSignedAmount: party.openingType === "to_pay" ? -party.opening : party.opening,
+        createdBy: req.user.user_id || req.user.id || null,
+      });
+    }
     await saveBanks(connection, result.insertId, req.user.company_id, party.bankAccounts);
     await connection.commit();
     return res.status(201).json({ message: "Vendor created successfully", vendorId: result.insertId });
@@ -205,6 +223,42 @@ exports.updateVendor = async (req, res) => {
     }
     connection = await db.getConnection();
     await connection.beginTransaction();
+    const [lockedRows] = await connection.query(
+      `SELECT id,opening_balance,opening_balance_type FROM vendors
+       WHERE id=? AND company_id=? LIMIT 1 FOR UPDATE`,
+      [req.params.id, req.user.company_id]
+    );
+    if (!lockedRows.length) {
+      const lockError = new Error("Vendor not found");
+      lockError.status = 404;
+      throw lockError;
+    }
+    const prior = lockedRows[0];
+    if (prior.opening_balance_type !== party.openingType &&
+        (Number(prior.opening_balance || 0) || party.opening)) {
+      const typeError = new Error("Clear the opening balance with an adjustment before changing its direction");
+      typeError.status = 409;
+      throw typeError;
+    }
+    const previousSigned = prior.opening_balance_type === "to_collect"
+      ? Number(prior.opening_balance || 0)
+      : -Number(prior.opening_balance || 0);
+    const newSigned = party.openingType === "to_collect" ? party.opening : -party.opening;
+    if (newSigned !== previousSigned) {
+      const targetAccount = await resolvePartyControlAccount(
+        connection, req.user.company_id, "vendor", party.openingType
+      );
+      await recordOpeningBalanceEvent({
+        connection,
+        companyId: req.user.company_id,
+        entityType: "vendor",
+        entityId: req.params.id,
+        targetAccount,
+        previousSignedAmount: previousSigned,
+        newSignedAmount: newSigned,
+        createdBy: req.user.user_id || req.user.id || null,
+      });
+    }
     await connection.query(
       `UPDATE vendors SET name=?, phone=?, email=?, gst_number=?, address=?,
        pan_number=?, opening_balance=?, opening_balance_type=?, party_category=?,
@@ -223,7 +277,7 @@ exports.updateVendor = async (req, res) => {
   } catch (error) {
     if (connection) await connection.rollback();
     console.error("Update vendor error:", error);
-    return res.status(500).json({ message: "Failed to update vendor" });
+    return res.status(error.status || 500).json({ message: error.message || "Failed to update vendor" });
   } finally {
     if (connection) connection.release();
   }

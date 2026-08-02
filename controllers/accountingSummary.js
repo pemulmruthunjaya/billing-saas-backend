@@ -285,6 +285,23 @@ exports.getAccountingSummary = async (db, companyId, filters = {}) => {
   const paidPayroll = money(payroll.paid_payroll);
   const salaryPayable = money(payroll.salary_payable);
 
+  const openingParams = [companyId];
+  const openingDateClause = to_date ? " AND je.journal_date <= ?" : "";
+  if (to_date) openingParams.push(to_date);
+  const [openingRows] = await db.query(
+    `SELECT a.id,a.account_code,a.account_name,a.account_type,
+            COALESCE(SUM(jed.debit),0) debit,COALESCE(SUM(jed.credit),0) credit
+     FROM opening_balance_events obe
+     INNER JOIN journal_entries je
+       ON je.id=obe.journal_entry_id AND je.company_id=obe.company_id
+     INNER JOIN journal_entry_details jed ON jed.journal_entry_id=je.id
+     INNER JOIN accounts a ON a.id=jed.account_id AND a.company_id=obe.company_id
+     WHERE obe.company_id=? ${openingDateClause}
+     GROUP BY a.id,a.account_code,a.account_name,a.account_type
+     ORDER BY a.account_type,a.account_name`,
+    openingParams
+  );
+
   const cash = money(paidSales - paidPurchases - paidPayroll);
   const profit = money(sales - purchases - payrollExpense);
 
@@ -303,7 +320,12 @@ exports.getAccountingSummary = async (db, companyId, filters = {}) => {
     paidPayroll,
     salaryPayable,
     cash,
-    profit
+    profit,
+    openingBalances: openingRows.map((row) => ({
+      ...row,
+      debit: money(row.debit),
+      credit: money(row.credit),
+    }))
   };
 };
 

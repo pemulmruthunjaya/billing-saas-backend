@@ -30,6 +30,10 @@ const run = async () => {
       if (text.includes("FROM payroll_entries")) {
         return [[{ payroll_expense: 0, paid_payroll: 0, salary_payable: 0 }]];
       }
+      if (text.includes("FROM opening_balance_events")) return [[
+        { id: 20, account_code: "0001", account_name: "Cash", account_type: "ASSET", debit: "100", credit: "0" },
+        { id: 99, account_code: "SYS-OBE-4", account_name: "Opening Balance Equity", account_type: "EQUITY", debit: "0", credit: "100" },
+      ]];
       throw new Error(`Unexpected SQL: ${text}`);
     },
   };
@@ -45,6 +49,7 @@ const run = async () => {
   assert.equal(summary.gstOutput, 216);
   assert.equal(summary.receivables, 1416);
   assert.equal(summary.receivables, summary.sales + summary.gstOutput);
+  assert.equal(summary.openingBalances.reduce((sum, row) => sum + row.debit - row.credit, 0), 0);
   assert.deepEqual(invoiceQuery.params, [4], "summary must remain company scoped");
 
   const controlCalls = [];

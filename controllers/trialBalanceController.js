@@ -116,6 +116,17 @@ exports.getTrialBalance = async (req, res) => {
       })
     ].filter((row) => Number(row.debit || 0) !== 0 || Number(row.credit || 0) !== 0);
 
+    for (const opening of summary.openingBalances || []) {
+      rows.push({
+        id: `opening-${opening.id}`,
+        account_code: opening.account_code,
+        account_name: opening.account_name,
+        account_type: opening.account_type,
+        debit: Number(opening.debit || 0),
+        credit: Number(opening.credit || 0)
+      });
+    }
+
 
 
     /**

@@ -1,5 +1,9 @@
 const db = require("../db/connection");
 const { ensureCustomerPartySchema } = require("../services/customerPartyService");
+const {
+  recordOpeningBalanceEvent,
+  resolvePartyControlAccount,
+} = require("../services/openingBalanceService");
 
 const GSTIN_PATTERN = /^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/;
 const PAN_PATTERN = /^[A-Z]{5}[0-9]{4}[A-Z]$/;
@@ -44,6 +48,7 @@ exports.createCustomer = async (req, res) => {
       : nullable(req.body.shipping_address);
     const openingBalanceType =
       req.body.opening_balance_type === "to_pay" ? "to_pay" : "to_collect";
+    const openingBalance = money(req.body.opening_balance);
     const creditPeriodDays = Math.max(0, Number.parseInt(req.body.credit_period_days, 10) || 0);
     const bankAccounts = normalizeBankAccounts(req.body.bank_accounts);
 
@@ -96,7 +101,7 @@ exports.createCustomer = async (req, res) => {
         req.user.company_id,
         gstin || null,
         panNumber || (gstin ? gstin.slice(2, 12) : null),
-        money(req.body.opening_balance),
+        openingBalance,
         openingBalanceType,
         nullable(req.body.party_category),
         billingAddress,
@@ -107,6 +112,21 @@ exports.createCustomer = async (req, res) => {
         nullable(req.body.contact_person_dob),
       ]
     );
+
+    if (openingBalance) {
+      const targetAccount = await resolvePartyControlAccount(
+        connection, req.user.company_id, "customer", openingBalanceType
+      );
+      await recordOpeningBalanceEvent({
+        connection,
+        companyId: req.user.company_id,
+        entityType: "customer",
+        entityId: result.insertId,
+        targetAccount,
+        newSignedAmount: openingBalanceType === "to_collect" ? openingBalance : -openingBalance,
+        createdBy: req.user.user_id || req.user.id || null,
+      });
+    }
 
     for (const account of bankAccounts) {
       await connection.query(
@@ -247,6 +267,7 @@ exports.updateCustomer = async (req, res) => {
         : nullable(req.body.shipping_address);
     const openingBalanceType =
       req.body.opening_balance_type === "to_pay" ? "to_pay" : "to_collect";
+    const openingBalance = money(req.body.opening_balance);
     const creditPeriodDays = Math.max(
       0,
       Number.parseInt(req.body.credit_period_days, 10) || 0
@@ -299,6 +320,42 @@ exports.updateCustomer = async (req, res) => {
 
     connection = await db.getConnection();
     await connection.beginTransaction();
+    const [lockedRows] = await connection.query(
+      `SELECT id,opening_balance,opening_balance_type FROM customers
+       WHERE id=? AND company_id=? LIMIT 1 FOR UPDATE`,
+      [req.params.id, req.user.company_id]
+    );
+    if (!lockedRows.length) {
+      const lockError = new Error("Customer not found");
+      lockError.status = 404;
+      throw lockError;
+    }
+    const prior = lockedRows[0];
+    if (prior.opening_balance_type !== openingBalanceType &&
+        (Number(prior.opening_balance || 0) || openingBalance)) {
+      const typeError = new Error("Clear the opening balance with an adjustment before changing its direction");
+      typeError.status = 409;
+      throw typeError;
+    }
+    const previousSigned = prior.opening_balance_type === "to_pay"
+      ? -Number(prior.opening_balance || 0)
+      : Number(prior.opening_balance || 0);
+    const newSigned = openingBalanceType === "to_pay" ? -openingBalance : openingBalance;
+    if (newSigned !== previousSigned) {
+      const targetAccount = await resolvePartyControlAccount(
+        connection, req.user.company_id, "customer", openingBalanceType
+      );
+      await recordOpeningBalanceEvent({
+        connection,
+        companyId: req.user.company_id,
+        entityType: "customer",
+        entityId: req.params.id,
+        targetAccount,
+        previousSignedAmount: previousSigned,
+        newSignedAmount: newSigned,
+        createdBy: req.user.user_id || req.user.id || null,
+      });
+    }
     await connection.query(
       `UPDATE customers SET
         name = ?, email = ?, phone = ?, address = ?, gstin = ?, pan_number = ?,
@@ -313,7 +370,7 @@ exports.updateCustomer = async (req, res) => {
         billingAddress,
         gstin || null,
         panNumber || (gstin ? gstin.slice(2, 12) : null),
-        money(req.body.opening_balance),
+        openingBalance,
         openingBalanceType,
         nullable(req.body.party_category),
         billingAddress,
@@ -355,7 +412,7 @@ exports.updateCustomer = async (req, res) => {
   } catch (error) {
     if (connection) await connection.rollback();
     console.error("Update customer error:", error);
-    return res.status(500).json({
+    return res.status(error.status || 500).json({
       message: "Failed to update customer",
       error: error.message,
     });

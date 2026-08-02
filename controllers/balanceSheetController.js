@@ -93,6 +93,21 @@ exports.getBalanceSheet = async (req, res) => {
 
     const equityRows = [];
 
+    for (const opening of summary.openingBalances || []) {
+      const debit = Number(opening.debit || 0);
+      const credit = Number(opening.credit || 0);
+      const row = {
+        id: `opening-${opening.id}`,
+        account_code: opening.account_code,
+        account_name: opening.account_name,
+        account_type: opening.account_type,
+        balance: opening.account_type === "ASSET" ? debit - credit : credit - debit
+      };
+      if (opening.account_type === "ASSET") assetRows.push(row);
+      if (opening.account_type === "LIABILITY") liabilityRows.push(row);
+      if (opening.account_type === "EQUITY") equityRows.push(row);
+    }
+
     const currentYearProfit =
       summary.profit;
 
