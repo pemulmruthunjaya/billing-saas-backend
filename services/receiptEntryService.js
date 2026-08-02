@@ -124,17 +124,17 @@ const listAccountOptions = async (companyId) => {
 const ensureSystemAccount = async (
   connection,
   companyId,
-  { code, name, type }
+  { code, name, type, alternateCode = code, alternateName = name }
 ) => {
   const [rows] = await connection.query(
     `SELECT id, account_code, account_name, account_type
      FROM accounts
      WHERE company_id = ?
        AND status = 1
-       AND (LOWER(account_name) = LOWER(?) OR account_code = ?)
+       AND (LOWER(account_name) IN (LOWER(?), LOWER(?)) OR account_code IN (?, ?))
      ORDER BY id
      LIMIT 1`,
-    [companyId, name, code]
+    [companyId, name, alternateName, code, alternateCode]
   );
   if (rows.length) {
     if (String(rows[0].account_type).toUpperCase() !== type) {
@@ -309,6 +309,8 @@ const createReceipt = async (body, user) => {
         code: `SYS-AR-${companyId}`,
         name: "Accounts Receivable",
         type: "ASSET",
+        alternateCode: "1100",
+        alternateName: "Customer Receivables",
       });
     } else if (receiptType === "ADVANCE") {
       receivedFromAccount = await ensureSystemAccount(connection, companyId, {
@@ -492,6 +494,7 @@ module.exports = {
   createReceipt,
   ensureReceiptEntrySchema,
   getCustomerOpenInvoices,
+  ensureSystemAccount,
   isCashBankAccount,
   isOtherCreditAccount,
   listAccountOptions,

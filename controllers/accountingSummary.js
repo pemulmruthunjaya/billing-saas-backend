@@ -126,7 +126,7 @@ exports.getAccountingSummary = async (db, companyId, filters = {}) => {
   const [invoiceRows] = await db.query(
     `
     SELECT
-      COALESCE(SUM(subtotal), 0) AS sales,
+      COALESCE(SUM(subtotal - COALESCE(discount_amount, 0)), 0) AS sales,
       COALESCE(SUM(tax_amount), 0) AS gst_output,
       COALESCE(SUM(total_amount), 0) AS total_sales,
       COALESCE(SUM(
