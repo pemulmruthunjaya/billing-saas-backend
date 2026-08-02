@@ -4,6 +4,10 @@ const {
   ensureUserAccessColumns,
   parsePermissions,
 } = require("../services/userAccessService");
+const {
+  assertBranchAccess,
+  assertCompanyAccess,
+} = require("../services/companyContextService");
 
 module.exports = async (req, res, next) => {
   try {
@@ -27,9 +31,9 @@ module.exports = async (req, res, next) => {
       `SELECT id, name, email, role, access_role, permissions, is_active, company_id,
               must_change_password, password_changed_at
        FROM users
-       WHERE id = ? AND company_id = ?
+       WHERE id = ?
        LIMIT 1`,
-      [decoded.user_id, decoded.company_id]
+      [decoded.user_id]
     );
 
     if (!users.length) {
@@ -37,6 +41,16 @@ module.exports = async (req, res, next) => {
     }
 
     const user = users[0];
+
+    await assertCompanyAccess(user.id, decoded.company_id);
+    if (decoded.branch_id) {
+      await assertBranchAccess({
+        userId: user.id,
+        companyId: decoded.company_id,
+        branchId: decoded.branch_id,
+        role: user.role,
+      });
+    }
 
     if (user.role === "staff" && Number(user.is_active) !== 1) {
       return res.status(403).json({ message: "This staff account is inactive" });
@@ -47,7 +61,8 @@ module.exports = async (req, res, next) => {
       name: user.name,
       email: user.email,
       role: user.role,
-      company_id: user.company_id,
+      company_id: Number(decoded.company_id),
+      branch_id: decoded.branch_id ? Number(decoded.branch_id) : null,
       access_role: user.role === "owner" ? "owner" : user.access_role || "sales",
       permissions: parsePermissions(
         user.permissions,

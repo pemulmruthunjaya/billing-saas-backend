@@ -27,6 +27,7 @@ const safePermissions = (permissions, role) => {
  * CREATE STAFF (OWNER only)
  */
 exports.createStaff = async (req, res) => {
+  let connection;
   try {
     await ensureUserAccessColumns();
 
@@ -58,7 +59,10 @@ exports.createStaff = async (req, res) => {
     const temporaryPassword = `Bs!${crypto.randomBytes(9).toString("base64url")}`;
     const hashedPassword = await bcrypt.hash(temporaryPassword, 10);
 
-    const [result] = await db.query(
+    connection = await db.getConnection();
+    await connection.beginTransaction();
+
+    const [result] = await connection.query(
       `INSERT INTO users
         (name, email, password, role, access_role, permissions, is_active, company_id, must_change_password)
        VALUES (?, ?, ?, 'staff', ?, ?, 1, ?, 1)`,
@@ -71,6 +75,36 @@ exports.createStaff = async (req, res) => {
         req.user.company_id
       ]
     );
+
+    await connection.query(
+      `INSERT INTO user_company_memberships
+        (user_id, company_id, membership_role, is_default, is_active)
+       VALUES (?, ?, 'staff', 1, 1)`,
+      [result.insertId, req.user.company_id]
+    );
+
+    const [headOfficeRows] = await connection.query(
+      `SELECT id FROM branches
+       WHERE company_id = ? AND is_head_office = 1 AND is_active = 1
+       LIMIT 1`,
+      [req.user.company_id]
+    );
+    if (!headOfficeRows.length) {
+      const error = new Error("Head Office branch is not configured for this company");
+      error.status = 409;
+      throw error;
+    }
+
+    await connection.query(
+      `INSERT INTO user_branch_memberships
+        (user_id, company_id, branch_id, is_default, is_active)
+       VALUES (?, ?, ?, 1, 1)`,
+      [result.insertId, req.user.company_id, headOfficeRows[0].id]
+    );
+
+    await connection.commit();
+    connection.release();
+    connection = null;
 
     const delivery = await sendStaffInvitation({
       name,
@@ -91,8 +125,12 @@ exports.createStaff = async (req, res) => {
     });
 
   } catch (error) {
+    if (connection) {
+      await connection.rollback();
+      connection.release();
+    }
     console.error("Create staff error:", error);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       message: "Failed to create staff"
     });
   }

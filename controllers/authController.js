@@ -1,12 +1,15 @@
 const db = require("../db/connection");
 const bcrypt = require("bcryptjs");
 const crypto = require("crypto");
-const { createCompany } = require("./company.controller");
 const { signAuthToken } = require("../utils/jwtToken");
+const {
+  issueContextToken,
+  listBranchesForUser,
+  listCompaniesForUser,
+} = require("../services/companyContextService");
 const {
   ensureUserAccessColumns,
   getDefaultPermissions,
-  parsePermissions,
 } = require("../services/userAccessService");
 const { sendPasswordReset } = require("../services/emailService");
 
@@ -14,7 +17,7 @@ const RESET_TOKEN_MINUTES = 30;
 const hashResetToken = (token) =>
   crypto.createHash("sha256").update(String(token)).digest("hex");
 
-const buildLoginResponse = (message, token, user) => ({
+const buildLoginResponse = (message, token, user, context = {}) => ({
   message,
   token,
   user: {
@@ -23,15 +26,42 @@ const buildLoginResponse = (message, token, user) => ({
     email: user.email,
     role: user.role,
     must_change_password: Number(user.must_change_password) === 1,
+    company_id: context.company_id || user.company_id,
+    branch_id: context.branch_id || null,
   },
   must_change_password: Number(user.must_change_password) === 1,
 });
+
+const resolveLoginContext = async (user) => {
+  const companies = await listCompaniesForUser(user.id);
+  const company = companies.find((item) => Number(item.is_default) === 1)
+    || companies.find((item) => Number(item.id) === Number(user.company_id))
+    || companies[0];
+  if (!company) throw new Error("No active company is assigned to this account");
+  const branches = await listBranchesForUser({
+    userId: user.id,
+    companyId: company.id,
+    role: user.role,
+  });
+  const branch = branches.find((item) => Number(item.is_default) === 1)
+    || branches.find((item) => Number(item.is_head_office) === 1)
+    || branches[0];
+  if (user.role === "staff" && !branch) {
+    const error = new Error("No active branch is assigned to this staff account");
+    error.status = 403;
+    throw error;
+  }
+  return { company_id: Number(company.id), branch_id: branch ? Number(branch.id) : null };
+};
 
 /**
  * OWNER REGISTER
  */
 exports.register = async (req, res) => {
+  let connection;
+  let transactionStarted = false;
   try {
+    connection = await db.getConnection();
     await ensureUserAccessColumns();
 
     const { company_name, name, email, password } = req.body;
@@ -58,28 +88,57 @@ exports.register = async (req, res) => {
       return res.status(409).json({ message: "User already exists" });
     }
 
-    const companyId = await createCompany({
-      name: company_name,
-      email: normalizedEmail
-    });
-
     const hashedPassword = await bcrypt.hash(password, 10);
-
-    const [userResult] = await db.query(
+    await connection.beginTransaction();
+    transactionStarted = true;
+    const [companyResult] = await connection.query(
+      "INSERT INTO companies (name, email) VALUES (?, ?)",
+      [company_name, normalizedEmail]
+    );
+    const companyId = companyResult.insertId;
+    const [userResult] = await connection.query(
       `INSERT INTO users (name, email, password, company_id, role, access_role)
        VALUES (?, ?, ?, ?, 'owner', 'owner')`,
       [name, normalizedEmail, hashedPassword, companyId]
     );
-
-    const token = signAuthToken(
-      {
-        user_id: userResult.insertId,
-        company_id: companyId,
-        role: "owner",
-        access_role: "owner",
-        permissions: getDefaultPermissions("owner")
-      }
+    const userId = userResult.insertId;
+    await connection.query(
+      `INSERT INTO user_company_memberships
+        (user_id, company_id, membership_role, is_default, is_active)
+       VALUES (?, ?, 'owner', 1, 1)`,
+      [userId, companyId]
     );
+    const [branchResult] = await connection.query(
+      `INSERT INTO branches
+        (company_id, name, code, branch_type, is_head_office, is_active, created_by)
+       VALUES (?, 'Head Office', 'HO', 'HEAD_OFFICE', 1, 1, ?)`,
+      [companyId, userId]
+    );
+    await connection.query(
+      `INSERT INTO user_branch_memberships
+        (user_id, company_id, branch_id, is_default, is_active)
+       VALUES (?, ?, ?, 1, 1)`,
+      [userId, companyId, branchResult.insertId]
+    );
+    await connection.query(
+      "INSERT INTO business_profiles (company_id, name, email) VALUES (?, ?, ?)",
+      [companyId, company_name, normalizedEmail]
+    );
+    await connection.query(
+      "INSERT INTO company_business_settings (company_id) VALUES (?)",
+      [companyId]
+    );
+    await connection.commit();
+    transactionStarted = false;
+
+    const token = signAuthToken({
+      user_id: userId,
+      company_id: companyId,
+      branch_id: branchResult.insertId,
+      role: "owner",
+      access_role: "owner",
+      permissions: getDefaultPermissions("owner")
+    });
 
     res.status(201).json({
       message: "Company and owner registered successfully",
@@ -87,8 +146,11 @@ exports.register = async (req, res) => {
     });
 
   } catch (error) {
+    if (connection && transactionStarted) await connection.rollback();
     console.error("Register error:", error);
     res.status(500).json({ message: "Registration failed" });
+  } finally {
+    if (connection) connection.release();
   }
 };
 
@@ -122,20 +184,12 @@ exports.login = async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    const token = signAuthToken(
-      {
-        user_id: user.id,
-        company_id: user.company_id,
-        role: user.role,
-        access_role: user.access_role || "owner",
-        permissions: parsePermissions(user.permissions, "owner"),
-        must_change_password: Number(user.must_change_password) === 1
-      }
-    );
+    const context = await resolveLoginContext(user);
+    const token = issueContextToken(user, context.company_id, context.branch_id);
 
     await db.query("UPDATE users SET last_login_at = NOW() WHERE id = ?", [user.id]);
 
-    res.json(buildLoginResponse("Login successful", token, user));
+    res.json(buildLoginResponse("Login successful", token, user, context));
 
   } catch (error) {
     console.error("Login error:", error);
@@ -186,24 +240,16 @@ exports.staffLogin = async (req, res) => {
       });
     }
 
-    const token = signAuthToken(
-      {
-        user_id: staff.id,
-        company_id: staff.company_id,
-        role: "staff",
-        access_role: staff.access_role || "sales",
-        permissions: parsePermissions(staff.permissions, staff.access_role || "sales"),
-        must_change_password: Number(staff.must_change_password) === 1
-      }
-    );
+    const context = await resolveLoginContext(staff);
+    const token = issueContextToken(staff, context.company_id, context.branch_id);
 
     await db.query("UPDATE users SET last_login_at = NOW() WHERE id = ?", [staff.id]);
 
-    res.json(buildLoginResponse("Staff login successful", token, staff));
+    res.json(buildLoginResponse("Staff login successful", token, staff, context));
 
   } catch (error) {
     console.error("Staff login error:", error);
-    res.status(500).json({
+    res.status(error.status || 500).json({
       message: "Staff login failed"
     });
   }
